@@ -122,7 +122,7 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
   onOpenHint,
   onOpenConceptBridge,
 }) => {
-  const [practiceStyle, setPracticeStyle] = useState<'beats' | 'flow'>('beats');
+  const [practiceStyle, setPracticeStyle] = useState<'beats' | 'flow'>('flow');
   const [beatStep, setBeatStep] = useState<number>(1);
   const [spokenBeats, setSpokenBeats] = useState<string[]>([]);
   const [isValidatingBeat, setIsValidatingBeat] = useState<boolean>(false);

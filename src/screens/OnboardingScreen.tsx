@@ -7,6 +7,7 @@ import {
   ArrowRight,
   Sparkles,
   Check,
+  KeyRound,
 } from 'lucide-react';
 import { UserLevel, UserPreferences } from '../types';
 import { SAMPLE_STUDY_SCENE } from '../data/sampleSceneData';
@@ -17,14 +18,16 @@ import { PillButton } from '../components/ui/PillButton';
 
 interface OnboardingScreenProps {
   initialLevel?: UserLevel;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
   onComplete: (prefs: UserPreferences) => void;
-  onStartDemo?: (selectedLevel?: UserLevel) => void;
 }
 
 export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
   initialLevel = 'A2',
+  apiKeyConnected = false,
+  onOpenApiSettings,
   onComplete,
-  onStartDemo,
 }) => {
   const [selectedLevel, setSelectedLevel] = useState<'A2' | 'B1'>(
     initialLevel === 'B1' ? 'B1' : 'A2'
@@ -34,43 +37,37 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
     level,
     hardestPart: "I know what I mean, but I can't say it quickly.",
     hasCompletedOnboarding: true,
+    preferAutoDemoMic: false,
+    hideSampleSessions: true,
   });
 
   const handleStartNow = () => {
     onComplete(buildPreferences(selectedLevel));
   };
 
-  const handleLaunchGuidedDemo = () => {
-    if (onStartDemo) {
-      onStartDemo(selectedLevel);
-    } else {
-      handleStartNow();
-    }
-  };
-
   const methods = [
     {
       id: 'label',
       title: '1. Direct Labeling (Cắt dịch ngầm)',
-      description: 'See object → Say English chunk aloud (“build a login page”).',
+      description: 'Snap or upload any photo → hear & say real English chunks aloud.',
       icon: Sparkles,
     },
     {
       id: 'expansion',
       title: '2. Sentence Expansion (Bậc thang)',
-      description: '“I’m coding.” → “+ building a login page” → “+ for my project.”',
+      description: 'Grow a 3-word seed into a rich sentence across 3 live AI rungs.',
       icon: Maximize2,
     },
     {
       id: 'development',
       title: '3. 5W1H / P.R.E + Guided Self-Talk',
-      description: 'Add [Why + How] & solo monologue (Notice → Maybe → Decide).',
+      description: 'Add [Why + How] & solo 3-beat monologue with real microphone.',
       icon: Brain,
     },
     {
       id: 'independent',
       title: '4. Active Recall (Rút giàn giáo)',
-      description: 'Hide photo & prompts — speak the full story from memory.',
+      description: 'Hide photo & prompts — speak your full story from memory.',
       icon: EyeOff,
     },
   ];
@@ -80,17 +77,21 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
       <AmbientMintArc />
 
       <div className="relative z-10 flex flex-col gap-2.5">
-        {/* Top Brand Bar + Instant Quick Start Shortcut */}
+        {/* Top Brand Bar + AI Key Setup Shortcut */}
         <div className="flex items-center justify-between min-h-[40px]">
           <BrandLogo size="md" />
-          {onStartDemo && (
+          {onOpenApiSettings && (
             <button
               type="button"
-              onClick={handleLaunchGuidedDemo}
-              className="h-8 px-3 rounded-full bg-[#EAF6EE] hover:bg-[#DEF0E4] text-[#148343] text-[12px] font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              onClick={onOpenApiSettings}
+              className={`h-8 px-3 rounded-full text-[11.5px] font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
+                apiKeyConnected
+                  ? 'bg-[#EAF6EE] text-[#148343]'
+                  : 'bg-amber-100/90 text-amber-900'
+              }`}
             >
-              <Sparkles className="w-3.5 h-3.5 stroke-[2.2] shrink-0" />
-              <span>Quick start</span>
+              <KeyRound className="w-3.5 h-3.5 stroke-[2.2] shrink-0" />
+              <span>{apiKeyConnected ? 'AI Live' : 'Set Gemini Key'}</span>
             </button>
           )}
         </div>
@@ -107,7 +108,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
             </span>
           </h1>
           <p className="text-[13.5px] text-[#55625B] leading-[1.42] mt-1">
-            5 connected speaking methods that grow a 2-word label into fluent 30-second speech.
+            Point your camera at any real scene or upload any photo — speak aloud through 5 AI-coached methods.
           </p>
         </div>
 
@@ -120,7 +121,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
           />
           <div className="absolute inset-0 bg-black/[0.06] pointer-events-none" />
 
-          {/* Borderless Pure-CSS Optical Focus Corners around Laptop */}
+          {/* Borderless Pure-CSS Optical Focus Corners */}
           <div
             className="absolute top-[25%] left-[33%] w-[29%] h-[44%] pointer-events-none"
             aria-hidden="true"
@@ -153,7 +154,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
         {/* Explicit Speaking Methodology Pipeline */}
         <div className="flex flex-col gap-1.5">
           <p className="text-[12px] font-extrabold uppercase tracking-[0.04em] text-[#148343] px-0.5">
-            Proven Speaking Methods Inside Every Session
+            5 Connected Methods · Live Camera, Mic & Gemini AI
           </p>
 
           <div className="flex flex-col gap-1.5">
@@ -166,7 +167,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
                   radius="lg"
                   padding="none"
                   interactive
-                  onClick={handleLaunchGuidedDemo}
+                  onClick={handleStartNow}
                   className="flex items-center justify-between gap-3 px-3.5 py-2"
                 >
                   <div className="flex items-center gap-3 min-w-0">
@@ -249,7 +250,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
           onClick={handleStartNow}
           rightIcon={<ArrowRight className="w-[18px] h-[18px] stroke-[2.3]" />}
         >
-          Get started
+          Open Live Camera
         </PillButton>
       </div>
     </div>

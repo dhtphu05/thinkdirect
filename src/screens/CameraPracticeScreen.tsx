@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Goal,
   Lightbulb,
@@ -6,6 +6,7 @@ import {
   EyeOff,
   Check,
   Zap,
+  AlertCircle,
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import {
@@ -14,14 +15,15 @@ import {
   ContextualExpression,
   InputMode,
   SessionResultData,
-  SessionMode,
   UserLevel,
+  NaturalPhrasingUpgrade,
 } from '../types';
 import {
   computeSessionMetrics,
   extractThoughtChainNodes,
   buildNaturalUpgrade,
 } from '../services/speakingEngine';
+import { apiFetch } from '../services/apiClient';
 import { VoiceInput, VoiceDraft } from '../components/VoiceInput';
 import { HintSheet } from '../components/HintSheet';
 import { WordDetailSheet } from '../components/WordDetailSheet';
@@ -34,10 +36,9 @@ import { playPronunciation } from '../utils/audioUtils';
 
 interface CameraPracticeScreenProps {
   scene: SceneData;
-  sessionMode?: SessionMode;
   userLevel?: UserLevel;
-  autoMode?: boolean;
-  onToggleAuto?: () => void;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
   streakDays?: number;
   onBack: () => void;
   onCompleteSession: (result: SessionResultData) => void;
@@ -57,10 +58,9 @@ const FALLBACK_PIN_COORDS = [
  */
 export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
   scene,
-  sessionMode = 'demo',
   userLevel = 'B1',
-  autoMode = true,
-  onToggleAuto,
+  apiKeyConnected,
+  onOpenApiSettings,
   onBack,
   onCompleteSession,
 }) => {
@@ -71,31 +71,35 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
   const [isHintOpen, setIsHintOpen] = useState<boolean>(false);
   const [hintTab, setHintTab] = useState<'hints' | 'bridge'>('hints');
   const [draft, setDraft] = useState<VoiceDraft | null>(null);
+  const [warningMessage, setWarningMessage] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [selectedWord, setSelectedWord] = useState<
     DetectedObject | ContextualExpression | null
   >(null);
 
-  const lowerTitle = scene.title.toLowerCase();
-  const sprintSamples = lowerTitle.includes('coffee')
-    ? {
-        step1:
-          "I'm having hot coffee at my desk before morning class because I have a team presentation today.",
-        step2:
-          "I'm drinking coffee before morning class because I have a team presentation today. Traffic might get busy, so I'll review my slides now and leave ten minutes early.",
-      }
-    : lowerTitle.includes('plan')
-      ? {
-          step1:
-            "I'm writing a daily checklist in my planner because two major assignments are due this week.",
-          step2:
-            "I'm organizing my schedule in my planner because two major assignments are due this week. To avoid feeling overwhelmed, I'll silence notifications and finish the hardest task first.",
-        }
-      : {
-          step1:
-            "I'm at my desk building a login page on my laptop so students can sign in securely.",
-          step2:
-            "I'm building a login page for my university project so students can sign in securely. Something isn't working with authentication, so I'll check the API response first.",
-        };
+  const hintVocabulary = useMemo(() => {
+    const words = [
+      ...scene.objects.map((o) => o.name),
+      ...scene.suggestedExpressions.map((e) => e.phrase),
+    ].filter(Boolean);
+    return Array.from(new Set(words)).slice(0, 10);
+  }, [scene]);
+
+  const blueprint = scene.practiceBlueprint;
+  const seedBase = (
+    scene.initialSuggestedThought ||
+    scene.objects[0]?.contextualSentence ||
+    `I'm focusing on ${scene.title.toLowerCase()}.`
+  ).replace(/[.!?]+$/, '');
+
+  const sprintSamples = {
+    step1:
+      blueprint?.recall.sprintStep1Sample ||
+      `${seedBase} right now because it helps me stay on top of my day.`,
+    step2:
+      blueprint?.recall.sprintStep2Sample ||
+      `${seedBase} right now because it matters today. Maybe a small distraction could come up, so first I'll focus on the main step carefully.`,
+  };
 
   const tasks = [
     {
@@ -122,8 +126,9 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
     idx <= stepIdx ? 'solid' : 'empty'
   );
 
-  const pins = (scene.objects.length > 0 ? scene.objects : []).slice(0, 4).map(
-    (obj, idx) => {
+  const pins = (scene.objects.length > 0 ? scene.objects : [])
+    .slice(0, 4)
+    .map((obj, idx) => {
       const fb = FALLBACK_PIN_COORDS[idx % FALLBACK_PIN_COORDS.length];
       const left = Math.min(80, Math.max(20, obj.xPercent ?? fb.x));
       const top = Math.min(78, Math.max(18, obj.yPercent ?? fb.y));
@@ -132,8 +137,7 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
         style: { left: `${left}%`, top: `${top}%` } as React.CSSProperties,
         item: obj,
       };
-    }
-  );
+    });
 
   const handlePinTap = (pin: (typeof pins)[number]) => {
     playPronunciation(pin.label);
@@ -147,12 +151,24 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
 
   const liveChain = extractThoughtChainNodes(draft?.text || '');
 
-  const handleResponseSubmit = (
+  const handleResponseSubmit = async (
     text: string,
     source: InputMode,
     durationSeconds: number
   ) => {
-    const nextResponses = [...responses, text];
+    const clean = text.trim();
+    const wordCount = clean.split(/\s+/).filter(Boolean).length;
+    if (wordCount < 4) {
+      setWarningMessage(
+        stepIdx === 0
+          ? 'Please speak at least one complete English sentence connecting what you see and why.'
+          : 'Please speak at least 2 connected English ideas from memory.'
+      );
+      return;
+    }
+
+    setWarningMessage(null);
+    const nextResponses = [...responses, clean];
     setResponses(nextResponses);
     setDraft(null);
 
@@ -161,8 +177,9 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
       return;
     }
 
-    const firstTurn = nextResponses[0] || tasks[0].sample;
-    const finalTurn = nextResponses[1] || tasks[1].sample;
+    setIsSubmitting(true);
+    const firstTurn = nextResponses[0] || clean;
+    const finalTurn = nextResponses[1] || clean;
 
     const metrics = computeSessionMetrics({
       initialThought: scene.initialSuggestedThought || firstTurn,
@@ -186,26 +203,60 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
       })),
       attempts: nextResponses.map((_, idx) => ({
         source,
-        durationSeconds: Math.max(idx === 0 ? 16 : 24, durationSeconds),
+        durationSeconds: Math.max(idx === 0 ? 12 : 20, durationSeconds),
         isValid: true,
       })),
-      selfTalkDurationSeconds: Math.max(16, durationSeconds),
-      recallDurationSeconds: Math.max(24, durationSeconds),
+      selfTalkDurationSeconds: Math.max(12, durationSeconds),
+      recallDurationSeconds: Math.max(20, durationSeconds),
       stagesCompleted: 4,
     });
 
-    const naturalUpgrade = buildNaturalUpgrade({
-      initialThought: firstTurn,
-      independentRecall: finalTurn,
-      sceneTitle: scene.title,
-    });
+    let serverFeedback: {
+      strength?: string;
+      improvement?: string;
+      independentExpressionsUsed?: string[];
+      suggestedNextPractice?: string;
+      naturalUpgrade?: NaturalPhrasingUpgrade;
+    } = {};
+
+    try {
+      const res = await apiFetch('/api/evaluate-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sceneTitle: scene.title,
+          initialThought: firstTurn,
+          expansionSentences: [firstTurn],
+          developmentSentences: [firstTurn],
+          selfTalkTranscript: finalTurn,
+          independentRecallTranscript: finalTurn,
+          hintsUsedCount: hintsUsed,
+          selfTalkDurationSeconds: metrics.speechContinuity.totalSpeakingSeconds,
+        }),
+      });
+      if (res.ok) {
+        serverFeedback = await res.json();
+      }
+    } catch {
+      // Graceful local fallback
+    } finally {
+      setIsSubmitting(false);
+    }
+
+    const naturalUpgrade =
+      serverFeedback.naturalUpgrade ||
+      buildNaturalUpgrade({
+        initialThought: firstTurn,
+        independentRecall: finalTurn,
+        sceneTitle: scene.title,
+      });
 
     const result: SessionResultData = {
       id: `sprint_${Date.now()}`,
       timestamp: Date.now(),
       sceneTitle: `${scene.title} · 90s Sprint`,
       sceneImageUrl: scene.imageUrl,
-      isDemoSession: sessionMode === 'demo' && autoMode,
+      isDemoSession: false,
       sessionType: 'daily_sprint',
       objectsLearned: scene.objects,
       expressionsLearned: scene.suggestedExpressions,
@@ -222,14 +273,19 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
       selfTalkDuration: metrics.speechContinuity.totalSpeakingSeconds,
       totalHintsUsed: hintsUsed,
       ideasExpressedCount: Math.max(4, metrics.meaningfulIdeaUnits),
-      independentExpressionsUsed: scene.suggestedExpressions
-        .slice(0, 3)
-        .map((e) => e.phrase),
+      independentExpressionsUsed:
+        serverFeedback.independentExpressionsUsed &&
+        serverFeedback.independentExpressionsUsed.length > 0
+          ? serverFeedback.independentExpressionsUsed
+          : scene.suggestedExpressions.slice(0, 3).map((e) => e.phrase),
       communicationStrength:
+        serverFeedback.strength ||
         'Completed a 90s Daily Sprint — anchored scene labels directly into blind spoken recall.',
-      oneThingToImprove: naturalUpgrade.whyItHelps,
+      oneThingToImprove:
+        serverFeedback.improvement || naturalUpgrade.whyItHelps,
       suggestedNextPractice:
-        'When you have 4 minutes, run the full 4-method workout on a new scene.',
+        serverFeedback.suggestedNextPractice ||
+        'When you have 4 minutes, run the full 5-method workout on a new photo.',
     };
 
     onCompleteSession(result);
@@ -249,9 +305,9 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
             }
           }}
           centerMode="brand"
-          rightMode="auto-sparkles"
-          autoActive={autoMode}
-          onToggleAuto={onToggleAuto}
+          rightMode={onOpenApiSettings ? 'api-status' : 'none'}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
           stepLabel="90s Daily Sprint"
           stageSubtitle={`Step ${stepIdx + 1} of ${tasks.length}`}
           segments={segments}
@@ -276,11 +332,15 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
 
         {stepIdx === 0 ? (
           <div className="relative w-full aspect-[16/9.6] rounded-[22px] overflow-hidden bg-[#1D2621] apple-shadow-md">
-            <img
-              src={scene.imageUrl}
-              alt={scene.title}
-              className="w-full h-full object-cover"
-            />
+            {scene.imageUrl ? (
+              <img
+                src={scene.imageUrl}
+                alt={scene.title}
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <div className="w-full h-full bg-gradient-to-br from-[#173024] to-[#0D1E16]" />
+            )}
             <div className="absolute inset-0 bg-black/[0.05] pointer-events-none" />
 
             <div className="absolute top-2.5 left-2.5 z-10 bg-black/55 backdrop-blur-md text-white text-[11px] font-bold px-2.5 py-1 rounded-full tabular-nums">
@@ -358,17 +418,24 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
       </div>
 
       <div className="relative z-10 flex flex-col items-center gap-2.5 pt-1">
+        {warningMessage && (
+          <div className="w-full rounded-[12px] bg-amber-50 px-3 py-2 flex items-start gap-2 text-[12px] font-semibold text-amber-900 apple-shadow-xs">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-amber-600" />
+            <span>{warningMessage}</span>
+          </div>
+        )}
+
         <VoiceInput
           key={`cam_sprint_step_${stepIdx}`}
           size="medium"
           idleLabel={
             stepIdx === 0 ? 'Tap to connect aloud' : 'Tap for 45s blind recall'
           }
+          sceneContext={scene.title}
+          hintVocabulary={hintVocabulary}
+          isSubmitting={isSubmitting}
           onSubmit={handleResponseSubmit}
           onDraftChange={setDraft}
-          sampleResponse={currentTask.sample}
-          isDemoMode={sessionMode === 'demo' && autoMode}
-          autoHappyPath={autoMode}
           placeholder="Speak directly in English..."
         />
 
@@ -411,6 +478,7 @@ export const CameraPracticeScreen: React.FC<CameraPracticeScreenProps> = ({
         initialTab={hintTab}
         userLevel={userLevel}
         sceneContext={scene.title}
+        quickVietnameseIdeas={blueprint?.quickVietnameseBridgeChips}
         level1={
           stepIdx === 0
             ? 'Name 1–2 objects you see and say why you are here.'

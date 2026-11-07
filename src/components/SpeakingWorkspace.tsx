@@ -529,7 +529,8 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
       : ctx.independentRecallPrompt;
 
   const effectiveMemoryCue = blueprint
-    ? `1. "${scene.title}" & why it matters · 2. Snag: ${blueprint.selfTalk.beat2Hypothesize} · 3. Next: ${blueprint.selfTalk.beat3Decide}`
+    ? blueprint.recall.memoryCue ||
+      `1. "${scene.title}" & why it matters · 2. Snag: ${blueprint.selfTalk.beat2Hypothesize} · 3. Next: ${blueprint.selfTalk.beat3Decide}`
     : undefined;
 
   const recordHintEvent = (
@@ -1198,6 +1199,9 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
                 : undefined
             }
             sceneContext={scene.title}
+            sceneObjects={scene.objects.map((o) => o.name)}
+            currentStage={stageKey}
+            currentThought={accumulatedThought}
             quickVietnameseIdeas={blueprint?.quickVietnameseBridgeChips}
             onUseHint={(lvl, isVn) => recordHintEvent(lvl, isVn)}
             onHintShown={() => recordHintEvent(1, false)}

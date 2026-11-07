@@ -172,6 +172,7 @@ export interface ScenePracticeBlueprint {
   };
   recall: {
     prompt: string;
+    memoryCue?: string;
     sampleSpeech: string;
     sprintStep1Sample: string;
     sprintStep2Sample: string;

@@ -1,10 +1,18 @@
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
+import { GoogleGenAI } from '@google/genai';
 import { ENV_CONFIG } from '../config/env.ts';
 import {
   stripDataUrlPrefix,
   withTimeout,
   ensurePlayableWavBase64,
 } from '../utils/mediaUtils.ts';
+import {
+  buildThinkingConfig,
+  withGeminiRetry,
+} from './geminiClientService.ts';
+import {
+  buildSttTranscriptionPrompt,
+  buildTtsCoachPrompt,
+} from '../prompts/speechPrompts.ts';
 
 export interface TranscribeAudioInput {
   ai: GoogleGenAI;
@@ -26,39 +34,35 @@ export async function transcribeSpokenAudio({
     mimeType || 'audio/webm'
   );
 
-  const vocabLine =
-    hintVocabulary.length > 0
-      ? `Relevant scene words that may appear: ${hintVocabulary.slice(0, 10).join(', ')}.`
-      : '';
-  const contextLine = sceneContext
-    ? `Topic context: "${sceneContext}".`
-    : '';
+  const sttPrompt = buildSttTranscriptionPrompt({
+    sceneContext,
+    hintVocabulary,
+  });
+  const thinkingConfig = buildThinkingConfig(ENV_CONFIG.sttModel, 'instant');
 
-  const response = await withTimeout(
-    ai.models.generateContent({
-      model: ENV_CONFIG.sttModel,
-      contents: {
-        parts: [
-          {
-            inlineData: {
-              mimeType: cleanMimeType,
-              data: base64,
+  const response = await withGeminiRetry(() =>
+    withTimeout(
+      ai.models.generateContent({
+        model: ENV_CONFIG.sttModel,
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType: cleanMimeType,
+                data: base64,
+              },
             },
-          },
-          {
-            text: `Transcribe the learner's spoken English audio accurately. ${contextLine} ${vocabLine}
-STRICT RULES:
-- Return ONLY the exact words the speaker actually said in English.
-- Do NOT invent words if the audio is silent, background noise, or unintelligible — return an empty string "" in that case.
-- Do NOT include commentary, labels, or surrounding quotation marks.`,
-          },
-        ],
-      },
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-      },
-    }),
-    18000
+            {
+              text: sttPrompt,
+            },
+          ],
+        },
+        config: {
+          ...(thinkingConfig ? { thinkingConfig } : {}),
+        },
+      }),
+      18000
+    )
   );
 
   const raw = (response.text || '')
@@ -66,7 +70,12 @@ STRICT RULES:
     .replace(/^["'“”]+|["'“”]+$/g, '')
     .trim();
 
-  if (/^(silence|no speech|empty|none|\[.*\]|\(.*\))$/i.test(raw)) {
+  if (
+    !raw ||
+    /^(silence|no speech|empty|none|inaudible|unintelligible|\[.*\]|\(.*\))$/i.test(
+      raw
+    )
+  ) {
     return { transcript: '' };
   }
 
@@ -77,23 +86,31 @@ export async function synthesizeGeminiSpeech(
   ai: GoogleGenAI,
   text: string
 ): Promise<{ audioBase64: string; mimeType: string }> {
-  const response = await withTimeout(
-    ai.models.generateContent({
-      model: ENV_CONFIG.ttsModel,
-      contents: [{ role: 'user', parts: [{ text: text.trim() }] }],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Kore' },
+  const cleanSpokenText = buildTtsCoachPrompt(text);
+  if (!cleanSpokenText) {
+    throw new Error('Empty text passed to Gemini TTS.');
+  }
+
+  const response = await withGeminiRetry(() =>
+    withTimeout(
+      ai.models.generateContent({
+        model: ENV_CONFIG.ttsModel,
+        contents: [{ role: 'user', parts: [{ text: cleanSpokenText }] }],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: 'Kore' },
+            },
           },
         },
-      },
-    }),
-    14000
+      }),
+      14000
+    )
   );
 
-  const inlineAudio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
+  const inlineAudio =
+    response.candidates?.[0]?.content?.parts?.[0]?.inlineData;
   if (!inlineAudio?.data) {
     throw new Error('No audio payload returned from Gemini TTS model.');
   }

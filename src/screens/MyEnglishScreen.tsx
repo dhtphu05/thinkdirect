@@ -10,7 +10,6 @@ import {
   CheckCircle2,
   TrendingUp,
   EyeOff,
-  Mic,
   CalendarClock,
 } from 'lucide-react';
 import { motion } from 'motion/react';
@@ -30,8 +29,8 @@ import { PillButton } from '../components/ui/PillButton';
 interface MyEnglishScreenProps {
   sessions: SessionResultData[];
   userPreferences: UserPreferences;
-  autoDemoMic?: boolean;
-  onToggleAutoDemoMic?: () => void;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
   onToggleLevel?: () => void;
   onToggleHideSamples?: () => void;
   onSelectSession: (session: SessionResultData) => void;
@@ -44,8 +43,8 @@ interface MyEnglishScreenProps {
 export const MyEnglishScreen: React.FC<MyEnglishScreenProps> = ({
   sessions,
   userPreferences,
-  autoDemoMic = true,
-  onToggleAutoDemoMic,
+  apiKeyConnected,
+  onOpenApiSettings,
   onToggleLevel,
   onToggleHideSamples,
   onSelectSession,
@@ -56,15 +55,17 @@ export const MyEnglishScreen: React.FC<MyEnglishScreenProps> = ({
 }) => {
   const [activeTab, setActiveTab] = useState<'sessions' | 'chunks'>('sessions');
 
-  const portfolio = computePortfolioSummary(sessions);
+  const portfolio = computePortfolioSummary(sessions, {
+    excludeSamples: Boolean(userPreferences.hideSampleSessions),
+  });
   const visibleSessions = portfolio.filteredSessions;
   const decaySteps = computeScaffoldingDecay(visibleSessions);
   const topDueSession = portfolio.dueRecallSessions[0] || null;
 
   const coreSelfTalkStarters = [
     {
-      phrase: "Something isn't working with...",
-      meaning: 'Notice an issue aloud without translating first.',
+      phrase: 'Right now, I notice...',
+      meaning: 'Observe what is in front of you directly in English.',
       source: 'Self-Talk Starter',
       isNew: false,
       spokenCount: 1,
@@ -106,14 +107,19 @@ export const MyEnglishScreen: React.FC<MyEnglishScreenProps> = ({
 
   const nextPracticeSuggestion =
     visibleSessions[0]?.suggestedNextPractice ||
-    'Capture a scene around you and connect what you see directly to spoken English.';
+    'Capture a real scene around you or upload a photo to build connected spoken English.';
 
   return (
     <div className="relative w-full flex-1 bg-[#FAF9F6] text-[#0F1F18] px-4 sm:px-5 pt-3 pb-24 flex flex-col gap-3.5 select-none safe-top overflow-x-clip">
       <AmbientMintArc />
 
       <div className="relative z-10 flex flex-col gap-3">
-        <PracticeHeader rightMode="streak" streakDays={portfolio.streakDays} />
+        <PracticeHeader
+          rightMode={onOpenApiSettings ? 'api-status' : 'streak'}
+          streakDays={portfolio.streakDays}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
+        />
 
         {/* Calm Editorial Header + Persistent Learner Settings */}
         <div className="flex items-start justify-between gap-2 flex-wrap">
@@ -127,6 +133,17 @@ export const MyEnglishScreen: React.FC<MyEnglishScreenProps> = ({
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0 mt-0.5">
+            {portfolio.hasSampleSessions && onToggleHideSamples && (
+              <button
+                type="button"
+                onClick={onToggleHideSamples}
+                className="text-[11px] font-bold bg-[#F2F4F1] hover:bg-[#E6EAE4] text-[#4C5951] px-2.5 py-1 rounded-full shrink-0 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                {userPreferences.hideSampleSessions
+                  ? 'Show examples'
+                  : 'My sessions only'}
+              </button>
+            )}
             <button
               type="button"
               onClick={onToggleLevel}
@@ -263,7 +280,7 @@ export const MyEnglishScreen: React.FC<MyEnglishScreenProps> = ({
           </SurfaceCard>
         )}
 
-        {/* Apple Segmented Control + Sample Filter Toggle */}
+        {/* Apple Segmented Control */}
         <div className="flex flex-col gap-1.5">
           <div className="flex bg-[#F2F3F1] p-1 rounded-full">
             <button
@@ -306,10 +323,10 @@ export const MyEnglishScreen: React.FC<MyEnglishScreenProps> = ({
                 </div>
                 <div>
                   <h3 className="text-[16px] font-bold text-[#101E17]">
-                    Ready for your first session
+                    Ready for your first real session
                   </h3>
                   <p className="text-[13px] text-[#58645D] max-w-[260px] leading-[1.45] mt-1">
-                    Capture a scene around you or pick a daily prompt to log your own English thoughts.
+                    Snap a live photo, upload an image from your device, or type any custom use-case to start speaking.
                   </p>
                 </div>
                 <PillButton

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   EyeOff,
   Timer,
@@ -7,13 +7,14 @@ import {
   AlertCircle,
   ArrowRight,
   Eye,
+  Upload,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import {
   SceneData,
   SessionResultData,
-  SessionMode,
   InputMode,
+  NaturalPhrasingUpgrade,
 } from '../types';
 import {
   extractThoughtChainNodes,
@@ -21,6 +22,7 @@ import {
   computeSessionMetrics,
   buildNaturalUpgrade,
 } from '../services/speakingEngine';
+import { apiFetch } from '../services/apiClient';
 import { VoiceInput, VoiceDraft } from '../components/VoiceInput';
 import { AmbientMintArc } from '../components/ui/BrandMark';
 import { PracticeHeader } from '../components/ui/PracticeHeader';
@@ -32,49 +34,39 @@ interface TransferChallengeScreenProps {
   scene: SceneData;
   challengeMode?: 'transfer' | 'blind_recall';
   originSessionId?: string;
-  sessionMode?: SessionMode;
-  initialAutoMode?: boolean;
-  onAutoModeChange?: (next: boolean) => void;
   priorInitialThought?: string;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
   onBack: () => void;
   onCompleteTransfer: (result: SessionResultData) => void;
 }
 
-const TRANSFER_SAMPLE_SPEECH: Record<string, string> = {
-  coffee:
-    "I'm having coffee before my morning class because I have a team presentation today. Traffic might be heavy this morning, so I'll review my slides and leave ten minutes early.",
-  planning:
-    "I'm organizing my schedule for this week because two major assignments are due soon. I might feel overwhelmed by deadlines, so first I'll silence notifications and finish the hardest task.",
-  default:
-    "I'm building a login page for my university project because students need to sign in securely. Something isn't working with authentication, maybe the token has expired, so I'll check the API response first.",
-};
-
-export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = ({
+export const TransferChallengeScreen: React.FC<
+  TransferChallengeScreenProps
+> = ({
   scene,
   challengeMode = 'transfer',
   originSessionId,
-  sessionMode = 'demo',
-  initialAutoMode = true,
-  onAutoModeChange,
   priorInitialThought,
+  apiKeyConnected,
+  onOpenApiSettings,
   onBack,
   onCompleteTransfer,
 }) => {
+  const [activeScene, setActiveScene] = useState<SceneData>(scene);
   const [phase, setPhase] = useState<'OBSERVE' | 'SPEAK_BLIND'>(
     challengeMode === 'blind_recall' ? 'SPEAK_BLIND' : 'OBSERVE'
   );
-  const [countdown, setCountdown] = useState<number>(5);
-  const [autoMode, setAutoMode] = useState<boolean>(initialAutoMode);
+  const [countdown, setCountdown] = useState<number>(6);
   const [draft, setDraft] = useState<VoiceDraft | null>(null);
   const [warningMessage, setWarningMessage] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  const handleToggleAuto = () => {
-    setAutoMode((prev) => {
-      const next = !prev;
-      onAutoModeChange?.(next);
-      return next;
-    });
-  };
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setActiveScene(scene);
+  }, [scene]);
 
   useEffect(() => {
     if (phase !== 'OBSERVE') return;
@@ -88,31 +80,104 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
     return () => clearTimeout(t);
   }, [phase, countdown]);
 
-  const sampleKey = /coffee|morning/i.test(scene.title)
-    ? 'coffee'
-    : /plan|week/i.test(scene.title)
-      ? 'planning'
-      : 'default';
-  const sampleSpeech = TRANSFER_SAMPLE_SPEECH[sampleKey];
+  const handleUploadCustomUnseenPhoto = (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result as string;
+      const cleanName = file.name
+        .replace(/\.[^.]+$/, '')
+        .replace(/[-_]+/g, ' ')
+        .trim();
+      setActiveScene({
+        title:
+          cleanName && cleanName.length <= 32
+            ? `Unseen Photo · ${cleanName}`
+            : 'Custom Unseen Photo',
+        description: 'Unassisted 30-second transfer check on your own photo.',
+        imageUrl: dataUrl,
+        objects: [],
+        suggestedExpressions: [],
+        openingQuestion: 'What is happening here and what will you do next?',
+        suggestedFramework: '5W1H',
+        isSample: false,
+      });
+      setCountdown(6);
+      setPhase('OBSERVE');
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
 
   const liveChain = extractThoughtChainNodes(draft?.text || '');
 
-  const handleSubmit = (
+  const handleSubmit = async (
     text: string,
     source: InputMode,
-    durationSeconds = 28
+    durationSeconds = 26
   ) => {
-    const evalRes = evaluateTransferAttempt(text, scene.title);
-    if (!evalRes.isValid) {
-      setWarningMessage(evalRes.feedback);
+    const clean = text.trim();
+    const wordCount = clean.split(/\s+/).filter(Boolean).length;
+    if (wordCount < 6) {
+      setWarningMessage(
+        'Speak at least two connected English sentences covering what is happening, why it matters, and your next move.'
+      );
       return;
     }
 
+    const localEval = evaluateTransferAttempt(clean, activeScene.title);
+
     setWarningMessage(null);
+    setIsSubmitting(true);
+
+    let coachFeedback = localEval.feedback;
+    let coachImprovement =
+      localEval.missingPillarPrompt ||
+      'Keep testing new everyday scenes with zero prompts to solidify automatic English thinking.';
+    let evaluatedByServer = false;
+
+    try {
+      const coachRes = await apiFetch('/api/coach-step', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stage: 'TRANSFER_CHALLENGE',
+          sceneContext: activeScene.title,
+          sceneObjects: activeScene.objects.map((o) => o.name),
+          latestTranscript: clean,
+        }),
+      });
+      if (coachRes.ok) {
+        const coachData = await coachRes.json();
+        evaluatedByServer = true;
+        if (!coachData.isValid) {
+          setIsSubmitting(false);
+          setWarningMessage(
+            coachData.feedback ||
+              'Try connecting what is happening, why it matters, and your next step.'
+          );
+          return;
+        }
+        if (coachData.feedback) coachFeedback = coachData.feedback;
+        if (coachData.hintL1) coachImprovement = coachData.hintL1;
+      }
+    } catch {
+      // Fall back to local transfer evaluation below when offline
+    }
+
+    if (!evaluatedByServer && !localEval.isValid) {
+      setIsSubmitting(false);
+      setWarningMessage(localEval.feedback);
+      return;
+    }
+
     const initialBaseline =
       priorInitialThought ||
-      scene.initialSuggestedThought ||
-      "I'm drinking coffee.";
+      activeScene.initialSuggestedThought ||
+      'Started with zero prompts.';
 
     const metrics = computeSessionMetrics({
       initialThought: initialBaseline,
@@ -122,39 +187,73 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
       howAnswer: '',
       selfTalkTranscript: text,
       independentRecallTranscript: text,
-      recallIdeasIdentified: evalRes.nodes
+      recallIdeasIdentified: localEval.nodes
         .filter((n) => n.isComplete)
         .map((n) => n.label),
       hintEvents: [],
       attempts: [
         {
           source,
-          durationSeconds: Math.max(24, durationSeconds),
+          durationSeconds: Math.max(20, durationSeconds),
           isValid: true,
         },
       ],
       selfTalkDurationSeconds: 0,
-      recallDurationSeconds: Math.max(24, durationSeconds),
+      recallDurationSeconds: Math.max(20, durationSeconds),
       stagesCompleted: 4,
     });
 
-    const naturalUpgrade = buildNaturalUpgrade({
-      initialThought: initialBaseline,
-      independentRecall: text,
-      sceneTitle: scene.title,
-    });
+    let serverEval: {
+      strength?: string;
+      improvement?: string;
+      independentExpressionsUsed?: string[];
+      suggestedNextPractice?: string;
+      naturalUpgrade?: NaturalPhrasingUpgrade;
+    } = {};
+
+    try {
+      const evalRes = await apiFetch('/api/evaluate-session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sceneTitle: activeScene.title,
+          initialThought: initialBaseline,
+          expansionSentences: [text],
+          developmentSentences: [],
+          selfTalkTranscript: text,
+          independentRecallTranscript: text,
+          hintsUsedCount: 0,
+          selfTalkDurationSeconds: Math.max(20, durationSeconds),
+        }),
+      });
+      if (evalRes.ok) {
+        serverEval = await evalRes.json();
+      }
+    } catch {
+      // Keep local naturalUpgrade fallback
+    } finally {
+      setIsSubmitting(false);
+    }
+
+    const naturalUpgrade =
+      serverEval.naturalUpgrade ||
+      buildNaturalUpgrade({
+        initialThought: initialBaseline,
+        independentRecall: text,
+        sceneTitle: activeScene.title,
+      });
 
     const result: SessionResultData = {
       id: `${challengeMode}_${Date.now()}`,
       timestamp: Date.now(),
-      sceneTitle: scene.title,
-      sceneImageUrl: scene.imageUrl,
-      isDemoSession: sessionMode === 'demo' && autoMode,
+      sceneTitle: activeScene.title,
+      sceneImageUrl: activeScene.imageUrl,
+      isDemoSession: false,
       sessionType:
         challengeMode === 'transfer' ? 'transfer_challenge' : 'blind_recall',
       originSessionId,
-      objectsLearned: scene.objects,
-      expressionsLearned: scene.suggestedExpressions,
+      objectsLearned: activeScene.objects,
+      expressionsLearned: activeScene.suggestedExpressions,
       thoughtJourney: {
         initialThought: initialBaseline,
         expandedThought: text,
@@ -165,15 +264,18 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
       },
       metrics,
       naturalUpgrade,
-      selfTalkDuration: Math.max(24, durationSeconds),
+      selfTalkDuration: Math.max(20, durationSeconds),
       totalHintsUsed: 0,
-      ideasExpressedCount: Math.max(4, evalRes.pillarsTransferred + 1),
-      independentExpressionsUsed: evalRes.independentExpressionsUsed,
-      communicationStrength: evalRes.feedback,
-      oneThingToImprove:
-        evalRes.missingPillarPrompt ||
-        'Keep testing new everyday scenes with zero prompts to solidify automatic English thinking.',
+      ideasExpressedCount: Math.max(4, localEval.pillarsTransferred + 1),
+      independentExpressionsUsed:
+        serverEval.independentExpressionsUsed &&
+        serverEval.independentExpressionsUsed.length > 0
+          ? serverEval.independentExpressionsUsed
+          : localEval.independentExpressionsUsed,
+      communicationStrength: serverEval.strength || coachFeedback,
+      oneThingToImprove: serverEval.improvement || coachImprovement,
       suggestedNextPractice:
+        serverEval.suggestedNextPractice ||
         'Try capturing a live photo of your workspace or street view for another 30s Transfer Check.',
     };
 
@@ -183,14 +285,21 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
   return (
     <div className="relative w-full min-h-[100dvh] bg-[#FAF9F6] text-[#0F1F18] px-4 sm:px-5 pt-3 pb-5 flex flex-col justify-between gap-3 select-none safe-top safe-bottom overflow-x-clip">
       <AmbientMintArc />
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleUploadCustomUnseenPhoto}
+        className="hidden"
+      />
 
       <div className="relative z-10 flex flex-col gap-3">
         <PracticeHeader
           onBack={onBack}
           centerMode="brand"
-          rightMode="auto-sparkles"
-          autoActive={autoMode}
-          onToggleAuto={handleToggleAuto}
+          rightMode={onOpenApiSettings ? 'api-status' : 'none'}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
           stepLabel={
             challengeMode === 'transfer'
               ? 'Skill Transfer Check'
@@ -214,23 +323,37 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
               className="flex flex-col gap-3.5"
             >
               <div>
-                <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#EAF6EE] text-[#148343] text-[11.5px] font-bold mb-1.5 tabular-nums">
-                  <Eye className="w-3.5 h-3.5 stroke-[2.2]" />
-                  <span>Observe unseen scene · Hiding in {countdown}s</span>
+                <div className="flex items-center justify-between gap-2 flex-wrap mb-1.5">
+                  <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#EAF6EE] text-[#148343] text-[11.5px] font-bold tabular-nums">
+                    <Eye className="w-3.5 h-3.5 stroke-[2.2]" />
+                    <span>Observe unseen scene · Hiding in {countdown}s</span>
+                  </div>
+
+                  {challengeMode === 'transfer' && (
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="h-7 px-2.5 rounded-full bg-white hover:bg-[#EAF6EE] text-[#148343] text-[11px] font-bold inline-flex items-center gap-1 apple-shadow-xs cursor-pointer"
+                    >
+                      <Upload className="w-3 h-3 stroke-[2.2]" />
+                      <span>Use my photo</span>
+                    </button>
+                  )}
                 </div>
+
                 <h1 className="text-[26px] sm:text-[29px] font-extrabold text-[#0D1F17] tracking-[-0.028em] leading-[1.14]">
                   New context. No prompts.
                 </h1>
                 <p className="text-[13.5px] text-[#55625B] leading-[1.45] mt-1">
-                  Take a 5-second look at this new scene. When it disappears, build a full English thought on your own.
+                  Take a quick look at this unseen scene. When it disappears, build a full English thought on your own.
                 </p>
               </div>
 
               {/* Unseen Photo Preview with ZERO English Labels */}
               <div className="relative w-full aspect-[4/3] rounded-[26px] overflow-hidden apple-shadow-md bg-[#E8ECE9]">
                 <img
-                  src={scene.imageUrl}
-                  alt={scene.title}
+                  src={activeScene.imageUrl}
+                  alt={activeScene.title}
                   className="w-full h-full object-cover"
                 />
                 <div className="absolute top-3 right-3 px-3 py-1.5 rounded-full bg-black/65 backdrop-blur-md text-white text-[12px] font-bold inline-flex items-center gap-1.5 tabular-nums">
@@ -241,7 +364,9 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
                   <span className="text-[10.5px] font-bold uppercase tracking-wider text-[#8CE6A8] block">
                     Unseen topic
                   </span>
-                  <span className="text-[14.5px] font-bold">{scene.title}</span>
+                  <span className="text-[14.5px] font-bold">
+                    {activeScene.title}
+                  </span>
                 </div>
               </div>
 
@@ -287,7 +412,11 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
                     : 'Recall from memory.'}
                 </h1>
                 <p className="text-[13.5px] text-[#55625B] leading-[1.45] mt-1">
-                  Topic: <strong className="text-[#101E17]">{scene.title}</strong> — express what’s happening, why it matters, a challenge, and your next move.
+                  Topic:{' '}
+                  <strong className="text-[#101E17]">
+                    {activeScene.title}
+                  </strong>{' '}
+                  — express what’s happening, why it matters, a challenge, and your next move.
                 </p>
               </div>
 
@@ -321,15 +450,15 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
 
               <div className="py-1">
                 <VoiceInput
-                  key={`transfer_mic_${challengeMode}`}
+                  key={`transfer_mic_${challengeMode}_${activeScene.title}`}
                   size="hero"
                   idleLabel="Tap for 30s unassisted speech"
                   targetDurationLabel="30s · Zero hints · Own words"
+                  sceneContext={activeScene.title}
+                  hintVocabulary={activeScene.objects.map((o) => o.name)}
+                  isSubmitting={isSubmitting}
                   onSubmit={handleSubmit}
                   onDraftChange={setDraft}
-                  sampleResponse={sampleSpeech}
-                  isDemoMode={sessionMode === 'demo'}
-                  autoHappyPath={autoMode}
                   placeholder="Speak directly in English: what you're doing, why, any obstacle, and what you'll do first..."
                 />
               </div>
@@ -344,7 +473,8 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
                   <Goal className="w-4 h-4 stroke-[2.2]" />
                 </div>
                 <p className="text-[12px] text-[#3E4B44] leading-snug">
-                  <strong className="text-[#101E17]">Fluency check:</strong> Connects Action → Context → Purpose → Next step in a new scene without memorized prompts.
+                  <strong className="text-[#101E17]">Fluency check:</strong>{' '}
+                  Connects Action → Context → Purpose → Next step in an unseen scene without memorized prompts.
                 </p>
               </SurfaceCard>
             </motion.div>
@@ -353,7 +483,7 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
       </div>
 
       {phase === 'SPEAK_BLIND' && challengeMode === 'transfer' && (
-        <div className="relative z-10 flex justify-center pt-1">
+        <div className="relative z-10 flex items-center justify-center gap-4 pt-1">
           <button
             type="button"
             onClick={() => {
@@ -364,6 +494,15 @@ export const TransferChallengeScreen: React.FC<TransferChallengeScreenProps> = (
           >
             <Sparkles className="w-3.5 h-3.5" />
             <span>Peek scene again (5s)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="text-[12px] font-semibold text-[#148343] hover:opacity-80 inline-flex items-center gap-1 cursor-pointer"
+          >
+            <Upload className="w-3.5 h-3.5" />
+            <span>Upload new photo</span>
           </button>
         </div>
       )}

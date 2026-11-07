@@ -5,13 +5,13 @@ import {
   RefreshCw,
   Zap,
   ZapOff,
-  Mic,
   ArrowRight,
   BookOpen,
   AlertCircle,
   Upload,
   Sparkles,
   Target,
+  KeyRound,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { compressImage } from '../utils/audioUtils';
@@ -29,19 +29,17 @@ interface CameraHomeScreenProps {
     rawImageDataUrl: string,
     mode: SessionMode
   ) => void;
-  onOpenCameraPractice?: (scene: SceneData, mode: SessionMode) => void;
   userLevel?: UserLevel;
-  streakDays?: number;
   apiKeyConnected?: boolean;
+  apiHealthLoaded?: boolean;
   onOpenApiSettings?: () => void;
 }
 
 export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
   onSceneCaptured,
-  onOpenCameraPractice,
   userLevel = 'B1',
-  streakDays = 1,
   apiKeyConnected = true,
+  apiHealthLoaded = true,
   onOpenApiSettings,
 }) => {
   const [cameraState, setCameraState] = useState<
@@ -51,9 +49,6 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
     'environment'
   );
   const [isAnalyzing, setIsAnalyzing] = useState<boolean>(false);
-  const [cameraMode, setCameraMode] = useState<'journey' | 'quick_talk'>(
-    'journey'
-  );
   const [flashOn, setFlashOn] = useState<boolean>(false);
   const [showMethodGuide, setShowMethodGuide] = useState<boolean>(false);
   const [userGoal, setUserGoal] = useState<string>('');
@@ -152,18 +147,16 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
     }
   };
 
-  const routeToDestination = (scene: SceneData, rawDataUrl: string) => {
-    if (cameraMode === 'quick_talk' && onOpenCameraPractice) {
-      onOpenCameraPractice(scene, 'real');
-    } else {
-      onSceneCaptured(scene, rawDataUrl, 'real');
-    }
-  };
-
   const analyzeCapturedImage = async (compressedDataUrl: string) => {
-    setIsAnalyzing(true);
-    setAnalysisError(null);
     setCapturedPreviewUrl(compressedDataUrl);
+    setAnalysisError(null);
+
+    if (apiHealthLoaded && !apiKeyConnected && onOpenApiSettings) {
+      onOpenApiSettings();
+      return;
+    }
+
+    setIsAnalyzing(true);
 
     try {
       const response = await apiFetch('/api/analyze-scene', {
@@ -209,7 +202,7 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
       };
 
       setIsAnalyzing(false);
-      routeToDestination(realScene, compressedDataUrl);
+      onSceneCaptured(realScene, compressedDataUrl, 'real');
     } catch {
       setIsAnalyzing(false);
       setAnalysisError(
@@ -221,7 +214,7 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
   const captureFrame = async () => {
     if (isAnalyzing) return;
 
-    // If user already picked/captured an image that failed due to missing API key, re-analyze it
+    // If user already captured/uploaded a photo (e.g. while setting API key), analyze it directly
     if (capturedPreviewUrl) {
       await analyzeCapturedImage(capturedPreviewUrl);
       return;
@@ -259,7 +252,6 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
       return;
     }
     try {
-      setIsAnalyzing(true);
       stopCamera();
       const compressedDataUrl = await compressImage(file, 1100, 0.84);
       await analyzeCapturedImage(compressedDataUrl);
@@ -294,10 +286,10 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [isAnalyzing, userGoal, userLevel]);
+  }, [isAnalyzing, userGoal, userLevel, apiKeyConnected, apiHealthLoaded]);
 
   return (
-    <div className="relative w-full flex-1 bg-[#FAF9F6] text-[#0F1F18] px-4 sm:px-5 pt-3 pb-5 flex flex-col justify-between gap-2.5 safe-top select-none overflow-x-clip">
+    <div className="relative w-full flex-1 bg-[#FAF9F6] text-[#0F1F18] px-4 sm:px-5 pt-3 pb-6 flex flex-col justify-between gap-3 safe-top safe-bottom select-none overflow-x-clip">
       <AmbientMintArc />
 
       <input
@@ -310,21 +302,46 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
 
       <div className="relative z-10 flex flex-col gap-2.5">
         <PracticeHeader
-          rightMode="streak"
-          streakDays={streakDays}
-          apiKeyConnected={apiKeyConnected}
+          rightMode="api-status"
+          apiKeyConnected={!apiHealthLoaded || apiKeyConnected}
           onOpenApiSettings={onOpenApiSettings}
         />
 
         <div className="mt-0.5">
           <h1 className="text-[26px] sm:text-[29px] font-extrabold tracking-[-0.028em] text-[#0D1F17] leading-[1.14] inline-flex items-start">
-            <span>Snap any scene & speak.</span>
+            <span>Snap a photo & speak.</span>
             <RadiantRays className="w-6 h-6 -mt-2.5 ml-0.5" />
           </h1>
           <p className="text-[13px] text-[#55625B] leading-[1.4] mt-1">
-            Point your camera or upload any real photo — Gemini builds all 5 speaking methods around it.
+            Capture with your camera or upload any photo to practice thinking & speaking directly in English.
           </p>
         </div>
+
+        {/* Friendly 1-Tap API Key Setup Banner when no key is set yet */}
+        {apiHealthLoaded && !apiKeyConnected && onOpenApiSettings && (
+          <button
+            type="button"
+            onClick={onOpenApiSettings}
+            className="w-full text-left rounded-[16px] bg-amber-100/90 hover:bg-amber-100 text-amber-950 px-3.5 py-2.5 flex items-center justify-between gap-2.5 apple-shadow-xs transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-8 h-8 rounded-full bg-white text-amber-800 flex items-center justify-center shrink-0">
+                <KeyRound className="w-4 h-4 stroke-[2.2]" />
+              </div>
+              <div className="min-w-0">
+                <span className="block text-[12.5px] font-extrabold leading-tight">
+                  Connect your Gemini API Key first
+                </span>
+                <span className="block text-[11px] font-medium text-amber-900/85 leading-snug">
+                  Tap here to paste your key for live Vision, Mic STT & AI Coach
+                </span>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-amber-900 text-white text-[11px] font-bold shrink-0 whitespace-nowrap">
+              Set Key
+            </span>
+          </button>
+        )}
 
         {/* Live Camera / Photo Dropzone Viewfinder */}
         <div
@@ -339,7 +356,7 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
             const file = e.dataTransfer.files?.[0];
             if (file) void processUploadedFile(file);
           }}
-          className={`relative w-full aspect-[4/3.05] rounded-[24px] overflow-hidden bg-[#16201B] apple-shadow-md transition-all ${
+          className={`relative w-full aspect-[4/3.15] rounded-[24px] overflow-hidden bg-[#16201B] apple-shadow-md transition-all ${
             isDraggingOver ? 'ring-4 ring-[#148343]' : ''
           }`}
         >
@@ -372,12 +389,12 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
                 <h3 className="text-[15px] font-bold">
                   {cameraState === 'starting'
                     ? 'Starting Live Camera...'
-                    : 'Camera off or permission blocked'}
+                    : 'Camera unavailable or permission blocked'}
                 </h3>
                 <p className="text-[12px] text-white/75 mt-0.5 leading-snug">
                   {cameraState === 'starting'
                     ? 'Allow camera access in your browser, or upload any photo.'
-                    : 'Enable camera access, upload any photo, or paste (Cmd+V).'}
+                    : 'Enable camera access, upload a photo, or paste (Cmd+V).'}
                 </p>
               </div>
               {cameraState === 'unavailable' && (
@@ -481,7 +498,7 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
                   Gemini Vision Analyzing Photo...
                 </h3>
                 <p className="text-xs text-white/80 max-w-xs">
-                  Detecting real objects, natural phrases, and building your 5-method speaking workout.
+                  Detecting objects, natural phrases, and building your speaking steps.
                 </p>
               </motion.div>
             )}
@@ -518,7 +535,7 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
           </div>
         )}
 
-        {/* Optional Use-Case / Speaking Context Input for Any Photo */}
+        {/* Optional Speaking Goal Input */}
         <SurfaceCard
           tone="elevated"
           radius="lg"
@@ -532,12 +549,12 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
             type="text"
             value={userGoal}
             onChange={(e) => setUserGoal(e.target.value)}
-            placeholder="Optional context: ordering food, client meeting, cooking..."
+            placeholder="Optional goal: ordering coffee, studying, cooking..."
             className="flex-1 min-w-0 bg-transparent text-[12.5px] font-semibold text-[#101E17] placeholder:text-[#7A8780] focus:outline-none"
           />
         </SurfaceCard>
 
-        {/* Explicit 5-Method Pipeline Strip */}
+        {/* Explicit 5-Step Flow Strip */}
         <div className="rounded-[15px] bg-[#EEF5F0] px-2.5 py-1.5 flex items-center justify-between gap-1.5">
           <div className="flex items-center flex-wrap gap-0.5 min-w-0 text-[10.5px] font-bold text-[#14231B]">
             <span className="text-[#148343] font-extrabold">Label</span>
@@ -557,70 +574,43 @@ export const CameraHomeScreen: React.FC<CameraHomeScreenProps> = ({
             className="h-6 px-2 rounded-full bg-white text-[#148343] text-[10px] font-extrabold inline-flex items-center gap-1 apple-shadow-xs cursor-pointer shrink-0 whitespace-nowrap"
           >
             <BookOpen className="w-2.5 h-2.5 stroke-[2.4] shrink-0" />
-            <span>5 Methods</span>
+            <span>How it works</span>
           </button>
         </div>
       </div>
 
-      {/* Bottom Shutter Orb + Mode Segmented Pill */}
-      <div className="relative z-10 flex flex-col items-center gap-2.5 pt-1 pb-1">
-        <div className="flex items-center gap-4">
-          <div className="p-2 rounded-full bg-white apple-shadow-sm ring-[8px] ring-[#EAF6EE]">
-            <motion.button
-              whileTap={{ scale: 0.93 }}
-              type="button"
-              onClick={() => void captureFrame()}
-              disabled={isAnalyzing}
-              className="w-[66px] h-[66px] rounded-full bg-gradient-to-br from-[#239956] via-[#157B43] to-[#0B572E] text-white flex items-center justify-center shadow-[inset_0_1px_2px_rgba(255,255,255,0.3)] cursor-pointer disabled:opacity-50"
-              aria-label={
-                capturedPreviewUrl
-                  ? 'Analyze photo with Gemini'
-                  : cameraState === 'active'
-                    ? 'Capture live photo'
-                    : 'Choose photo to analyze'
-              }
-            >
-              {capturedPreviewUrl ? (
-                <Sparkles className="w-7 h-7 stroke-[2.1]" />
-              ) : (
-                <Camera className="w-7 h-7 stroke-[2.1]" />
-              )}
-            </motion.button>
-          </div>
+      {/* Single Focused Shutter / Analyze CTA */}
+      <div className="relative z-10 flex flex-col items-center gap-2 pt-1">
+        <div className="p-2 rounded-full bg-white apple-shadow-sm ring-[8px] ring-[#EAF6EE]">
+          <motion.button
+            whileTap={{ scale: 0.93 }}
+            type="button"
+            onClick={() => void captureFrame()}
+            disabled={isAnalyzing}
+            className="w-[70px] h-[70px] rounded-full bg-gradient-to-br from-[#239956] via-[#157B43] to-[#0B572E] text-white flex items-center justify-center shadow-[inset_0_1px_2px_rgba(255,255,255,0.3)] cursor-pointer disabled:opacity-50"
+            aria-label={
+              capturedPreviewUrl
+                ? 'Analyze photo with Gemini'
+                : cameraState === 'active'
+                  ? 'Capture live photo'
+                  : 'Choose photo to analyze'
+            }
+          >
+            {capturedPreviewUrl ? (
+              <Sparkles className="w-7 h-7 stroke-[2.1]" />
+            ) : (
+              <Camera className="w-7 h-7 stroke-[2.1]" />
+            )}
+          </motion.button>
         </div>
 
-        <div className="bg-[#F2F3F1] p-1 rounded-full flex items-center">
-          <button
-            type="button"
-            onClick={() => setCameraMode('journey')}
-            className={`px-3.5 py-1.5 rounded-full text-[12px] font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
-              cameraMode === 'journey'
-                ? 'bg-[#E2F4E9] text-[#138041]'
-                : 'text-[#55615A] hover:text-[#101E17]'
-            }`}
-          >
-            <Camera className="w-3.5 h-3.5 stroke-[2.2] shrink-0" />
-            <span>5-Method Journey</span>
-          </button>
-
-          <span
-            className="w-[1px] h-4 bg-black/[0.08] mx-1 shrink-0"
-            aria-hidden="true"
-          />
-
-          <button
-            type="button"
-            onClick={() => setCameraMode('quick_talk')}
-            className={`px-3.5 py-1.5 rounded-full text-[12px] font-semibold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap ${
-              cameraMode === 'quick_talk'
-                ? 'bg-[#E2F4E9] text-[#138041] font-bold'
-                : 'text-[#55615A] hover:text-[#101E17]'
-            }`}
-          >
-            <Mic className="w-3.5 h-3.5 stroke-[2.1] shrink-0" />
-            <span>90s Sprint</span>
-          </button>
-        </div>
+        <span className="text-[12px] font-bold text-[#4D5A53]">
+          {capturedPreviewUrl
+            ? 'Tap to analyze this photo & start speaking'
+            : cameraState === 'active'
+              ? 'Tap shutter to capture · or Upload photo'
+              : 'Tap to choose a photo from your device'}
+        </span>
       </div>
 
       <MethodGuideSheet

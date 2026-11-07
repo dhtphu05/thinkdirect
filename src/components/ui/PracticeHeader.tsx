@@ -26,7 +26,13 @@ interface PracticeHeaderProps {
   /** Title text when centerMode === 'title' (e.g. 'Practice · 4 of 4' or 'Practice Complete') */
   centerTitle?: string;
   /** Right slot mode */
-  rightMode?: 'auto-sparkles' | 'auto-zap' | 'more' | 'streak' | 'none';
+  rightMode?:
+    | 'auto-sparkles'
+    | 'auto-zap'
+    | 'api-status'
+    | 'more'
+    | 'streak'
+    | 'none';
   autoActive?: boolean;
   onToggleAuto?: () => void;
   onMoreClick?: () => void;
@@ -111,7 +117,9 @@ export const PracticeHeader: React.FC<PracticeHeaderProps> = ({
             </button>
           )}
 
-          {(rightMode === 'auto-sparkles' || rightMode === 'auto-zap') && (
+          {(rightMode === 'auto-sparkles' ||
+            rightMode === 'auto-zap' ||
+            rightMode === 'api-status') && (
             <button
               type="button"
               onClick={onOpenApiSettings}

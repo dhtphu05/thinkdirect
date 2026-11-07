@@ -28,7 +28,7 @@ import { PracticeActionFooter } from '../components/ui/PillButton';
 interface SessionResultsScreenProps {
   result: SessionResultData;
   onStartNewSession: () => void;
-  onGoToMyEnglish: () => void;
+  onGoToMyEnglish?: () => void;
   onSelectTopic?: (topic: string) => void;
   onNextTopicHub?: () => void;
   onStartTransferChallenge?: () => void;
@@ -385,9 +385,21 @@ export const SessionResultsScreen: React.FC<SessionResultsScreenProps> = ({
       {/* Bottom Action Bar */}
       <div className="relative z-10 mt-1">
         <PracticeActionFooter
-          secondaryLabel="My English"
-          onSecondary={onGoToMyEnglish}
-          primaryLabel={showTransferCta ? 'Transfer Check' : 'Next topic'}
+          secondaryLabel={
+            onGoToMyEnglish
+              ? 'My English'
+              : onSelectTopic
+                ? 'Practice Again'
+                : undefined
+          }
+          onSecondary={
+            onGoToMyEnglish
+              ? onGoToMyEnglish
+              : onSelectTopic
+                ? () => onSelectTopic(result.sceneTitle)
+                : undefined
+          }
+          primaryLabel={showTransferCta ? 'Transfer Check' : 'Snap Another Photo'}
           onPrimary={() => {
             if (showTransferCta && onStartTransferChallenge) {
               onStartTransferChallenge();

@@ -65,12 +65,22 @@ export async function handleConceptBridge(
     );
   }
 
-  const { vietnameseIdea = '', sceneContext = 'Everyday Moment' } =
-    req.body || {};
+  const {
+    vietnameseIdea = '',
+    sceneContext = 'Everyday Moment',
+    sceneObjects = [],
+    currentStage = '',
+    currentThought = '',
+  } = req.body || {};
   const result = await bridgeVietnameseConcept(
     req.geminiClient,
     String(vietnameseIdea),
-    String(sceneContext)
+    String(sceneContext),
+    {
+      sceneObjects: Array.isArray(sceneObjects) ? sceneObjects : [],
+      currentStage: String(currentStage || ''),
+      currentThought: String(currentThought || ''),
+    }
   );
 
   res.json(result);

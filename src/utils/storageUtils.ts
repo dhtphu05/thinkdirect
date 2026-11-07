@@ -210,8 +210,8 @@ export function getStoredPreferences(): UserPreferences {
     level: 'B1',
     hardestPart: "I know what I mean, but I can't say it quickly.",
     hasCompletedOnboarding: false,
-    preferAutoDemoMic: true,
-    hideSampleSessions: false,
+    preferAutoDemoMic: false,
+    hideSampleSessions: true,
   };
 }
 

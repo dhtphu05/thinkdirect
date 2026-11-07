@@ -28,6 +28,9 @@ interface HintSheetProps {
   level3?: string;
   vietnameseRescue?: string;
   sceneContext?: string;
+  sceneObjects?: string[];
+  currentStage?: string;
+  currentThought?: string;
   quickVietnameseIdeas?: string[];
   onUseHint?: (level: 1 | 2 | 3, isVietnameseRescue: boolean) => void;
 }
@@ -90,6 +93,9 @@ export const HintSheet: React.FC<HintSheetProps> = ({
   level3,
   vietnameseRescue,
   sceneContext = 'Everyday Speaking Scene',
+  sceneObjects,
+  currentStage,
+  currentThought,
   quickVietnameseIdeas: customVietnameseIdeas,
   onUseHint,
 }) => {
@@ -155,6 +161,9 @@ export const HintSheet: React.FC<HintSheetProps> = ({
         body: JSON.stringify({
           vietnameseIdea: trimmed,
           sceneContext: context,
+          sceneObjects,
+          currentStage,
+          currentThought,
         }),
       });
       if (res.ok) {
@@ -218,6 +227,9 @@ export const HintSheet: React.FC<HintSheetProps> = ({
         body: JSON.stringify({
           vietnameseIdea: trimmed,
           sceneContext,
+          sceneObjects,
+          currentStage,
+          currentThought,
         }),
       });
       if (res.ok) {

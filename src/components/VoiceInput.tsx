@@ -261,6 +261,13 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
     browserTranscriptRef.current = '';
     setLivePreviewText('');
     if (typeof window === 'undefined') return;
+    // Avoid concurrent SpeechRecognition on Safari/WebKit where it mutes MediaRecorder audio tracks
+    if (
+      typeof navigator !== 'undefined' &&
+      /^((?!chrome|android).)*safari/i.test(navigator.userAgent)
+    ) {
+      return;
+    }
     const win = window as unknown as {
       SpeechRecognition?: new () => BrowserSpeechRecognitionInstance;
       webkitSpeechRecognition?: new () => BrowserSpeechRecognitionInstance;

@@ -503,8 +503,14 @@ export class RealPracticeAdapter implements IPracticeAdapter {
       subStep,
       this.sceneLabel
     );
-    // Catch instant repetition or empty speech in 0ms without network latency
-    if (!local.isValid || typeof window === 'undefined') {
+    const wordCount = newAttempt.trim().split(/\s+/).filter(Boolean).length;
+
+    // Only short-circuit in 0ms on empty speech or exact repetition (or Node test runtime)
+    if (
+      wordCount < 2 ||
+      local.outcome === 'REPEAT' ||
+      typeof window === 'undefined'
+    ) {
       return local;
     }
 
@@ -526,12 +532,17 @@ export class RealPracticeAdapter implements IPracticeAdapter {
       return {
         ...local,
         isValid: Boolean(data.isValid ?? local.isValid),
+        outcome: data.outcome || local.outcome,
         feedback: data.feedback || local.feedback,
         synthesizedThought: data.synthesizedThought || local.synthesizedThought,
         nextPrompt: data.nextPrompt || local.nextPrompt,
         isAlreadyComplete: Boolean(
           data.isAlreadyComplete ?? local.isAlreadyComplete
         ),
+        addedWords:
+          Array.isArray(data.addedWords) && data.addedWords.length > 0
+            ? data.addedWords
+            : local.addedWords,
         hintL1: data.hintL1 || local.hintL1,
         hintL2: data.hintL2 || local.hintL2,
         hintL3: data.hintL3 || local.hintL3,
@@ -556,7 +567,13 @@ export class RealPracticeAdapter implements IPracticeAdapter {
       priorTurnAnswer,
       this.sceneLabel
     );
-    if (!local.isValid || typeof window === 'undefined') {
+    const wordCount = answer.trim().split(/\s+/).filter(Boolean).length;
+    const isExactRepeat =
+      local.outcome === 'REPEATED_WHY_AS_HOW' ||
+      local.outcome === 'REPEATED_REASON_AS_EXAMPLE';
+
+    // Let valid natural speech without rigid keywords (e.g. "To pass my exam") reach Gemini!
+    if (wordCount < 2 || isExactRepeat || typeof window === 'undefined') {
       return local;
     }
 
@@ -582,6 +599,7 @@ export class RealPracticeAdapter implements IPracticeAdapter {
       return {
         ...local,
         isValid: Boolean(data.isValid ?? local.isValid),
+        outcome: data.outcome || local.outcome,
         feedback: data.feedback || local.feedback,
         nextPrompt: data.nextPrompt || local.nextPrompt,
         hintL1: data.hintL1 || local.hintL1,
@@ -621,7 +639,8 @@ export class RealPracticeAdapter implements IPracticeAdapter {
         }
       : evaluateSelfTalkMonologue(monologue);
 
-    if (!local.isValid || typeof window === 'undefined') {
+    const minWordsForAi = beatStep ? 2 : 4;
+    if (wordCount < minWordsForAi || typeof window === 'undefined') {
       return local;
     }
 
@@ -644,6 +663,10 @@ export class RealPracticeAdapter implements IPracticeAdapter {
         ...local,
         isValid: Boolean(data.isValid ?? local.isValid),
         feedback: data.feedback || local.feedback,
+        connectorsFound:
+          Array.isArray(data.connectorsFound) && data.connectorsFound.length > 0
+            ? data.connectorsFound
+            : local.connectorsFound,
         hintL1: data.hintL1,
         hintL2: data.hintL2,
         hintL3: data.hintL3,
@@ -664,7 +687,8 @@ export class RealPracticeAdapter implements IPracticeAdapter {
       hintsUsed,
       referenceUtterances
     );
-    if (!local.isValid || typeof window === 'undefined') {
+    const wordCount = recall.trim().split(/\s+/).filter(Boolean).length;
+    if (wordCount < 5 || typeof window === 'undefined') {
       return local;
     }
 
@@ -674,6 +698,7 @@ export class RealPracticeAdapter implements IPracticeAdapter {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           stage: 'INDEPENDENT_RECALL',
+          hintsUsed,
           sceneContext: this.sceneLabel,
           sceneObjects: this.sceneObjects,
           previousSentences: referenceUtterances,
@@ -682,17 +707,34 @@ export class RealPracticeAdapter implements IPracticeAdapter {
       });
       if (!res.ok) return local;
       const data = await res.json();
+      const rawCoverage =
+        typeof data.coverageScore === 'number'
+          ? data.coverageScore > 1
+            ? data.coverageScore / 100
+            : data.coverageScore
+          : local.coverageScore;
+      const ideasIdentified =
+        Array.isArray(data.ideasIdentified) && data.ideasIdentified.length > 0
+          ? data.ideasIdentified
+          : local.ideasIdentified;
+
       if (!data.isValid) {
         return {
           ...local,
           isValid: false,
-          improvement: data.feedback || local.improvement,
+          coverageScore: Number(rawCoverage.toFixed(2)),
+          ideasIdentified,
+          improvement:
+            data.improvement || data.feedback || local.improvement,
         };
       }
       return {
         ...local,
-        strength: data.feedback || local.strength,
-        improvement: data.hintL1 || local.improvement,
+        isValid: true,
+        coverageScore: Number(rawCoverage.toFixed(2)),
+        ideasIdentified,
+        strength: data.strength || data.feedback || local.strength,
+        improvement: data.improvement || data.hintL1 || local.improvement,
       };
     } catch {
       return local;
