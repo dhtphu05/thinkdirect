@@ -1,0 +1,11 @@
+{
+  "name": "Remix ThinkDirect",
+  "description": "Camera-first English thinking and speaking coach helping learners form thoughts directly in English.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
