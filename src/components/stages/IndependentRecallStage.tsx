@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Goal, EyeOff, Lightbulb, X, Check, AlertCircle } from 'lucide-react';
-import { InputMode, SessionMode, UserLevel } from '../../types';
+import { InputMode, UserLevel } from '../../types';
 import { extractThoughtChainNodes } from '../../services/speakingEngine';
 import { VoiceInput, VoiceDraft } from '../VoiceInput';
 import { PracticeHeader } from '../ui/PracticeHeader';
@@ -12,11 +12,13 @@ import { MethodGuideSheet } from '../ui/MethodGuideSheet';
 
 interface IndependentRecallStageProps {
   userLevel?: UserLevel;
-  autoMode: boolean;
-  onToggleAuto: () => void;
+  sceneContext?: string;
+  hintVocabulary?: string[];
+  memoryCueText?: string;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
   onBack: () => void;
   topicPrompt: string;
-  recallSample: string;
   inlineFeedback?: { type: 'success' | 'warning'; message: string } | null;
   onSubmitAttempt: (
     text: string,
@@ -24,21 +26,21 @@ interface IndependentRecallStageProps {
     durationSeconds?: number
   ) => void;
   isSubmitting: boolean;
-  sessionMode: SessionMode;
   onRecallCueUsed: () => void;
 }
 
 export const IndependentRecallStage: React.FC<IndependentRecallStageProps> = ({
   userLevel = 'B1',
-  autoMode,
-  onToggleAuto,
+  sceneContext,
+  hintVocabulary = [],
+  memoryCueText,
+  apiKeyConnected,
+  onOpenApiSettings,
   onBack,
   topicPrompt,
-  recallSample,
   inlineFeedback,
   onSubmitAttempt,
   isSubmitting,
-  sessionMode,
   onRecallCueUsed,
 }) => {
   const [cueRevealed, setCueRevealed] = useState<boolean>(false);
@@ -60,9 +62,9 @@ export const IndependentRecallStage: React.FC<IndependentRecallStageProps> = ({
         <PracticeHeader
           onBack={onBack}
           centerMode="brand"
-          rightMode="auto-sparkles"
-          autoActive={autoMode}
-          onToggleAuto={onToggleAuto}
+          rightMode={onOpenApiSettings ? 'api-status' : 'none'}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
         />
 
         <MethodRoadmapStrip
@@ -153,12 +155,11 @@ export const IndependentRecallStage: React.FC<IndependentRecallStageProps> = ({
           size="hero"
           idleLabel="Tap for Active Recall"
           targetDurationLabel="Aim for 30–60 seconds"
+          sceneContext={sceneContext}
+          hintVocabulary={hintVocabulary}
           onSubmit={onSubmitAttempt}
           onDraftChange={setDraft}
-          sampleResponse={recallSample}
           isSubmitting={isSubmitting}
-          isDemoMode={sessionMode === 'demo'}
-          autoHappyPath={autoMode}
           placeholder="Express your activity, why it matters, the challenge, and your next step..."
         />
       </div>
@@ -189,7 +190,8 @@ export const IndependentRecallStage: React.FC<IndependentRecallStageProps> = ({
               3-part memory cue
             </span>
             <p className="text-[12px] text-[#36443C] mt-0.5 leading-snug">
-              1. Activity & why · 2. What snag came up · 3. Your first move.
+              {memoryCueText ||
+                '1. Activity & why · 2. What challenge came up · 3. Your first move.'}
             </p>
           </SurfaceCard>
         )}

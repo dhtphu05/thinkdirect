@@ -8,13 +8,13 @@ import {
   ArrowRight,
   Keyboard,
   AlertCircle,
-  Sparkles,
   Timer,
   Check,
   Volume2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { blobToBase64, playPronunciation } from '../utils/audioUtils';
+import { apiFetch } from '../services/apiClient';
 import { InputMode, VoiceInputState } from '../types';
 
 export interface VoiceDraft {
@@ -27,7 +27,11 @@ interface BrowserSpeechRecognitionInstance {
   lang: string;
   interimResults: boolean;
   continuous: boolean;
-  onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
+  onresult:
+    | ((event: {
+        results: ArrayLike<ArrayLike<{ transcript: string }>>;
+      }) => void)
+    | null;
   onerror: (() => void) | null;
   start: () => void;
   stop: () => void;
@@ -35,34 +39,19 @@ interface BrowserSpeechRecognitionInstance {
 
 interface VoiceInputProps {
   onSubmit: (text: string, source: InputMode, durationSeconds: number) => void;
-  sampleResponse?: string;
-  /** Optional counter-example phrase (e.g. "im coding") for 1-tap SLA guardrail demo on video */
-  repeatTrapSample?: string;
+  sceneContext?: string;
+  hintVocabulary?: string[];
   placeholder?: string;
   isSubmitting?: boolean;
-  isDemoMode?: boolean;
-  /** Smooth 1-take video recording mode controlled by header Auto toggle */
-  autoHappyPath?: boolean;
   targetDurationLabel?: string;
   maxDurationSeconds?: number;
-  promptLabel?: string;
-  isDarkTheme?: boolean;
-  onSampleRequested?: () => void;
-  /** Visual scale: 'compact' (Stage 1/2 card), 'medium' (Camera Practice), 'hero' (Stage 3/4 standalone) */
   size?: 'compact' | 'medium' | 'hero';
-  /** Custom idle caption under mic ('Tap to speak' vs 'Tap to start speaking') */
   idleLabel?: string;
-  /** When true, hides internal submit footer so screen-level PracticeActionFooter controls Retry/Continue */
   hideInlineActions?: boolean;
-  /** Hides internal utility pills when parent renders custom helper pills */
   hideUtilityPills?: boolean;
-  /** Notifies parent when transcript/typed draft changes */
   onDraftChange?: (draft: VoiceDraft | null) => void;
-  /** Incrementing counter to externally trigger reset */
   resetSignal?: number;
-  /** Incrementing counter to externally switch into typing mode */
   typingSignal?: number;
-  /** Optional starter phrase to prefill when user taps a discourse-marker chip */
   typingPrefill?: string;
 }
 
@@ -72,14 +61,11 @@ const HERO_BARS = [7, 15, 25, 13, 30, 18, 22, 12, 7];
 
 export const VoiceInput: React.FC<VoiceInputProps> = ({
   onSubmit,
-  sampleResponse,
-  repeatTrapSample,
+  sceneContext = '',
+  hintVocabulary = [],
   placeholder = 'Speak your thought in English...',
   isSubmitting = false,
-  isDemoMode = false,
-  autoHappyPath,
   targetDurationLabel,
-  onSampleRequested,
   size = 'compact',
   idleLabel,
   hideInlineActions = false,
@@ -92,26 +78,30 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
   const [inputMode, setInputMode] = useState<InputMode>('microphone');
   const [voiceState, setVoiceState] = useState<VoiceInputState>('IDLE');
   const [transcript, setTranscript] = useState<string>('');
+  const [livePreviewText, setLivePreviewText] = useState<string>('');
   const [typedText, setTypedText] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null);
   const [isPlayingPreview, setIsPlayingPreview] = useState<boolean>(false);
-  const [waveTick, setWaveTick] = useState<number>(0);
+  const [liveLevels, setLiveLevels] = useState<number[]>([]);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const browserSttRef = useRef<BrowserSpeechRecognitionInstance | null>(null);
   const browserTranscriptRef = useRef<string>('');
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<number | null>(null);
-  const demoTimerRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRafRef = useRef<number | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const transcriptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const activeAttemptIdRef = useRef<number>(0);
 
-  const useGuidedCapture = Boolean(sampleResponse && autoHappyPath !== false);
+  const isHero = size === 'hero';
+  const isMedium = size === 'medium';
+  const baseBars = isHero ? HERO_BARS : isMedium ? MEDIUM_BARS : COMPACT_BARS;
 
   useEffect(() => {
     if (voiceState !== 'TRANSCRIPT_REVIEW' || !transcriptTextareaRef.current) {
@@ -156,52 +146,107 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
     }
   }, [typingSignal, typingPrefill]);
 
-  // Recording timer & live waveform animation tick
+  // Recording elapsed timer
   useEffect(() => {
     if (voiceState === 'RECORDING' && !isPaused) {
       timerIntervalRef.current = window.setInterval(() => {
         setElapsedSeconds((prev) => prev + 1);
       }, 1000);
-      const waveInterval = window.setInterval(() => {
-        setWaveTick((t) => t + 1);
-      }, 130);
       return () => {
         if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-        clearInterval(waveInterval);
       };
-    } else {
-      if (timerIntervalRef.current) {
-        clearInterval(timerIntervalRef.current);
-        timerIntervalRef.current = null;
-      }
+    } else if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
     }
   }, [voiceState, isPaused]);
 
-  // Sync draft upstream when transcript/typedText changes
+  // Sync draft upstream
   useEffect(() => {
     if (!onDraftChange) return;
     const activeText =
-      inputMode === 'typing' ? typedText.trim() : transcript.trim();
+      inputMode === 'typing'
+        ? typedText.trim()
+        : (transcript || livePreviewText).trim();
     if (activeText) {
       onDraftChange({
         text: activeText,
-        source: useGuidedCapture ? 'demo_sample' : inputMode,
+        source: inputMode,
         durationSeconds:
-          elapsedSeconds || Math.max(3, Math.round(activeText.split(/\s+/).length / 2.3)),
+          elapsedSeconds ||
+          Math.max(3, Math.round(activeText.split(/\s+/).length / 2.2)),
       });
     } else {
       onDraftChange(null);
     }
-  }, [transcript, typedText, inputMode, useGuidedCapture, elapsedSeconds]);
+  }, [transcript, livePreviewText, typedText, inputMode, elapsedSeconds]);
 
-  // Cleanup audio & speech tracks on unmount
+  const stopAudioAnalyser = () => {
+    if (analyserRafRef.current) {
+      cancelAnimationFrame(analyserRafRef.current);
+      analyserRafRef.current = null;
+    }
+    if (audioCtxRef.current) {
+      try {
+        void audioCtxRef.current.close();
+      } catch {
+        // Ignore close error
+      }
+      audioCtxRef.current = null;
+    }
+    setLiveLevels([]);
+  };
+
+  const startAudioAnalyser = (stream: MediaStream, barCount: number) => {
+    stopAudioAnalyser();
+    if (typeof window === 'undefined') return;
+    const AudioContextCtor =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!AudioContextCtor) return;
+
+    try {
+      const ctx = new AudioContextCtor();
+      audioCtxRef.current = ctx;
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 64;
+      analyser.smoothingTimeConstant = 0.72;
+      source.connect(analyser);
+
+      const freqData = new Uint8Array(analyser.frequencyBinCount);
+
+      const updateLevels = () => {
+        analyser.getByteFrequencyData(freqData);
+        const nextLevels: number[] = [];
+        for (let i = 0; i < barCount; i++) {
+          const binIdx = Math.min(
+            freqData.length - 1,
+            Math.floor(((i + 1) / (barCount + 1)) * Math.min(18, freqData.length))
+          );
+          const norm = freqData[binIdx] / 255;
+          nextLevels.push(0.45 + norm * 1.45);
+        }
+        setLiveLevels(nextLevels);
+        analyserRafRef.current = requestAnimationFrame(updateLevels);
+      };
+
+      analyserRafRef.current = requestAnimationFrame(updateLevels);
+    } catch {
+      // Fallback gracefully if AudioContext is restricted
+    }
+  };
+
   useEffect(() => {
     return () => {
-      if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
+      stopAudioAnalyser();
       if (browserSttRef.current) {
         try {
           browserSttRef.current.stop();
-        } catch {}
+        } catch {
+          // Ignore
+        }
       }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((track) => track.stop());
@@ -214,6 +259,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
 
   const startBrowserSpeechBackup = () => {
     browserTranscriptRef.current = '';
+    setLivePreviewText('');
     if (typeof window === 'undefined') return;
     const win = window as unknown as {
       SpeechRecognition?: new () => BrowserSpeechRecognitionInstance;
@@ -232,7 +278,9 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
         for (let i = 0; i < event.results.length; i++) {
           combined += `${event.results[i][0]?.transcript || ''} `;
         }
-        browserTranscriptRef.current = combined.trim();
+        const cleaned = combined.trim();
+        browserTranscriptRef.current = cleaned;
+        setLivePreviewText(cleaned);
       };
       recognition.onerror = () => {};
       recognition.start();
@@ -246,7 +294,9 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
     if (browserSttRef.current) {
       try {
         browserSttRef.current.stop();
-      } catch {}
+      } catch {
+        // Ignore
+      }
       browserSttRef.current = null;
     }
   };
@@ -254,34 +304,8 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
   const startRecording = async () => {
     if (isSubmitting) return;
 
-    // Realistic live waveform -> crisp Transcript Review (zero mic popup during video narration)
-    if (useGuidedCapture && sampleResponse) {
-      setErrorMessage(null);
-      setVoiceState('RECORDING');
-      setElapsedSeconds(1);
-      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-      timerIntervalRef.current = window.setInterval(() => {
-        setElapsedSeconds((s) => s + 1);
-      }, 650);
-      const wordEstimate = Math.max(
-        3,
-        Math.min(28, Math.round(sampleResponse.split(/\s+/).length / 2.2))
-      );
-      demoTimerRef.current = window.setTimeout(() => {
-        if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-        setElapsedSeconds(wordEstimate);
-        setTranscript(sampleResponse);
-        setVoiceState('TRANSCRIPT_REVIEW');
-      }, 1050);
-      return;
-    }
-
-    if (isDemoMode && onSampleRequested && !sampleResponse) {
-      onSampleRequested();
-      return;
-    }
-
     setErrorMessage(null);
+    setLivePreviewText('');
     audioChunksRef.current = [];
     if (recordedAudioUrl) {
       URL.revokeObjectURL(recordedAudioUrl);
@@ -296,17 +320,26 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
         throw new Error('Microphone access is not supported on this browser.');
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
       streamRef.current = stream;
+      startAudioAnalyser(stream, baseBars.length);
       startBrowserSpeechBackup();
 
       const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : MediaRecorder.isTypeSupported('audio/webm')
-        ? 'audio/webm'
-        : MediaRecorder.isTypeSupported('audio/mp4')
-        ? 'audio/mp4'
-        : '';
+          ? 'audio/webm'
+          : MediaRecorder.isTypeSupported('audio/mp4')
+            ? 'audio/mp4'
+            : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')
+              ? 'audio/ogg;codecs=opus'
+              : '';
 
       const recorder = new MediaRecorder(
         stream,
@@ -321,6 +354,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
       };
 
       recorder.onstop = async () => {
+        stopAudioAnalyser();
         stopBrowserSpeechBackup();
         if (activeAttemptIdRef.current !== currentAttemptId) return;
 
@@ -329,8 +363,10 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
           return;
         }
 
+        const effectiveMime =
+          mimeType || recorder.mimeType || 'audio/webm';
         const audioBlob = new Blob(audioChunksRef.current, {
-          type: mimeType || 'audio/webm',
+          type: effectiveMime,
         });
         const audioUrl = URL.createObjectURL(audioBlob);
         setRecordedAudioUrl(audioUrl);
@@ -338,22 +374,30 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
         setVoiceState('PROCESSING');
         try {
           const base64Audio = await blobToBase64(audioBlob);
-          const response = await fetch('/api/transcribe-audio', {
+          const response = await apiFetch('/api/transcribe-audio', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               audioBase64: base64Audio,
-              mimeType: mimeType || 'audio/webm',
+              mimeType: effectiveMime,
+              sceneContext,
+              hintVocabulary,
             }),
           });
 
           let recognizedText = '';
+          let apiErrorMsg = '';
           if (response.ok) {
             const data = await response.json();
             recognizedText = data.transcript?.trim() || '';
+          } else {
+            try {
+              const errData = await response.json();
+              apiErrorMsg = errData?.message || '';
+            } catch {
+              // Ignore parse error
+            }
           }
 
-          // Zero-latency client Web Speech backup when server has no API key
           if (!recognizedText && browserTranscriptRef.current) {
             recognizedText = browserTranscriptRef.current;
           }
@@ -362,14 +406,12 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
 
           if (recognizedText) {
             setTranscript(recognizedText);
-            setVoiceState('TRANSCRIPT_REVIEW');
-          } else if (sampleResponse) {
-            // Video-safe soft landing if mic was muted during screen recording
-            setTranscript(sampleResponse);
+            setLivePreviewText('');
             setVoiceState('TRANSCRIPT_REVIEW');
           } else {
             setErrorMessage(
-              "Couldn't hear speech clearly. Tap Try again or Type instead."
+              apiErrorMsg ||
+                "Couldn't hear clear English speech. Speak closer to the mic or tap Type instead."
             );
             setVoiceState('ERROR');
           }
@@ -377,9 +419,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
           if (activeAttemptIdRef.current !== currentAttemptId) return;
           if (browserTranscriptRef.current) {
             setTranscript(browserTranscriptRef.current);
-            setVoiceState('TRANSCRIPT_REVIEW');
-          } else if (sampleResponse) {
-            setTranscript(sampleResponse);
+            setLivePreviewText('');
             setVoiceState('TRANSCRIPT_REVIEW');
           } else {
             setErrorMessage(
@@ -400,31 +440,18 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
       setIsPaused(false);
       setVoiceState('RECORDING');
     } catch (err: unknown) {
+      stopAudioAnalyser();
       stopBrowserSpeechBackup();
-      // If screen recording software locks microphone, gracefully offer Transcript Review when sampleResponse exists
-      if (sampleResponse) {
-        setElapsedSeconds(4);
-        setTranscript(sampleResponse);
-        setVoiceState('TRANSCRIPT_REVIEW');
-        return;
-      }
       const msg =
         err instanceof Error && err.name === 'NotAllowedError'
-          ? 'Microphone permission is off. Allow microphone access or type instead.'
-          : 'Microphone unavailable on this device. You can type your thought below.';
+          ? 'Microphone permission was blocked. Allow mic access in your browser bar, or tap Type instead.'
+          : 'No microphone detected on this device. Tap Type instead to enter your English sentence.';
       setErrorMessage(msg);
       setVoiceState('ERROR');
     }
   };
 
   const pauseRecording = () => {
-    if (useGuidedCapture && voiceState === 'RECORDING' && !isPaused) {
-      if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
-      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-      setIsPaused(true);
-      setVoiceState('PAUSED');
-      return;
-    }
     if (mediaRecorderRef.current && voiceState === 'RECORDING' && !isPaused) {
       mediaRecorderRef.current.pause();
       setIsPaused(true);
@@ -433,15 +460,6 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
   };
 
   const resumeRecording = () => {
-    if (useGuidedCapture && isPaused && sampleResponse) {
-      setIsPaused(false);
-      setVoiceState('RECORDING');
-      demoTimerRef.current = window.setTimeout(() => {
-        setTranscript(sampleResponse);
-        setVoiceState('TRANSCRIPT_REVIEW');
-      }, 650);
-      return;
-    }
     if (mediaRecorderRef.current && isPaused) {
       mediaRecorderRef.current.resume();
       setIsPaused(false);
@@ -450,14 +468,6 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
   };
 
   const finishRecording = () => {
-    if (useGuidedCapture && sampleResponse) {
-      if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
-      if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
-      setIsPaused(false);
-      setTranscript(sampleResponse);
-      setVoiceState('TRANSCRIPT_REVIEW');
-      return;
-    }
     if (
       mediaRecorderRef.current &&
       (voiceState === 'RECORDING' || voiceState === 'PAUSED')
@@ -482,7 +492,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
         await audio.play();
         return;
       } catch {
-        // Fallback to browser SpeechSynthesis
+        // Fallback to SpeechSynthesis
       }
     }
 
@@ -492,7 +502,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
 
   const handleRetry = () => {
     activeAttemptIdRef.current = Date.now();
-    if (demoTimerRef.current) clearTimeout(demoTimerRef.current);
+    stopAudioAnalyser();
     stopBrowserSpeechBackup();
     if (previewAudioRef.current) {
       previewAudioRef.current.pause();
@@ -505,7 +515,9 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
     ) {
       try {
         mediaRecorderRef.current.stop();
-      } catch {}
+      } catch {
+        // Ignore
+      }
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
@@ -513,6 +525,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
     }
     setErrorMessage(null);
     setTranscript('');
+    setLivePreviewText('');
     setTypedText('');
     setElapsedSeconds(0);
     setIsPaused(false);
@@ -544,11 +557,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
       Math.max(3, Math.round(textToSubmit.split(/\s+/).length / 2.2));
 
     setVoiceState('EVALUATING');
-    onSubmit(
-      textToSubmit,
-      useGuidedCapture ? 'demo_sample' : inputMode,
-      spokenDuration
-    );
+    onSubmit(textToSubmit, inputMode, spokenDuration);
   };
 
   const formatTime = (secs: number) => {
@@ -557,14 +566,12 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const isHero = size === 'hero';
-  const isMedium = size === 'medium';
-  const baseBars = isHero ? HERO_BARS : isMedium ? MEDIUM_BARS : COMPACT_BARS;
   const defaultIdleText =
     idleLabel || (isHero ? 'Tap to start speaking' : 'Tap to speak');
 
   const renderWaveformWing = (reverse = false) => {
     const bars = reverse ? [...baseBars].reverse() : baseBars;
+    const levels = reverse ? [...liveLevels].reverse() : liveLevels;
     return (
       <div
         className={`flex items-center ${
@@ -574,20 +581,18 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
       >
         {bars.map((h, i) => {
           const isLive = voiceState === 'RECORDING' && !isPaused;
-          const liveFactor = isLive
-            ? 0.65 + ((Math.sin(waveTick * 0.9 + i * 1.3) + 1) / 2) * 0.85
-            : 1;
+          const liveFactor = isLive ? levels[i] || 0.7 : 1;
           return (
             <span
               key={i}
-              className={`rounded-full transition-all duration-150 ${
+              className={`rounded-full transition-all duration-100 ${
                 isHero || isMedium ? 'w-[3.5px]' : 'w-[3px]'
               } ${
                 isLive
                   ? 'bg-[#158445]'
                   : isHero || isMedium
-                  ? 'bg-[#94E0B4]'
-                  : 'bg-[#7ED4A0]'
+                    ? 'bg-[#94E0B4]'
+                    : 'bg-[#7ED4A0]'
               }`}
               style={{
                 height: `${Math.max(5, Math.round(h * liveFactor))}px`,
@@ -601,7 +606,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
 
   return (
     <div className="w-full flex flex-col items-center">
-      {/* Error Banner (Borderless Tonal) */}
+      {/* Error Banner */}
       <AnimatePresence>
         {voiceState === 'ERROR' && errorMessage && (
           <motion.div
@@ -612,7 +617,9 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
           >
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <div className="flex-1 flex flex-col gap-1">
-              <span className="font-medium leading-relaxed">{errorMessage}</span>
+              <span className="font-medium leading-relaxed">
+                {errorMessage}
+              </span>
               <div className="flex items-center gap-2.5 pt-0.5">
                 <button
                   type="button"
@@ -624,7 +631,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
                 <span>·</span>
                 <button
                   type="button"
-                  onClick={switchToTyping}
+                  onClick={() => switchToTyping(typingPrefill)}
                   className="font-bold underline text-xs cursor-pointer"
                 >
                   Type instead
@@ -635,7 +642,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
         )}
       </AnimatePresence>
 
-      {/* SCREEN 08: TRANSCRIPT REVIEW STATE (With Audio Playback + Editable Transcript) */}
+      {/* TRANSCRIPT REVIEW STATE (Real Recorded Playback + Editable Transcript) */}
       {voiceState === 'TRANSCRIPT_REVIEW' && (
         <motion.div
           initial={{ opacity: 0, scale: 0.98 }}
@@ -650,7 +657,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
           <div className="flex items-center justify-between gap-2">
             <span className="text-[11.5px] font-bold text-[#148343] flex items-center gap-1 whitespace-nowrap shrink-0">
               <Check className="w-3.5 h-3.5 stroke-[2.6] shrink-0" />
-              <span>Transcript Review</span>
+              <span>Your Spoken Transcript</span>
             </span>
 
             <div className="flex items-center gap-1.5 shrink-0">
@@ -667,7 +674,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
                 <span>
                   {isPlayingPreview
                     ? 'Playing...'
-                    : `Listen · ${Math.max(2, elapsedSeconds || 3)}s`}
+                    : `Hear my voice · ${Math.max(1, elapsedSeconds || 2)}s`}
                 </span>
               </button>
 
@@ -734,7 +741,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
               className="text-xs font-bold text-[#148343] flex items-center gap-1 cursor-pointer"
             >
               <Mic className="w-3.5 h-3.5" />
-              <span>Voice</span>
+              <span>Use Microphone</span>
             </button>
           </div>
 
@@ -764,7 +771,7 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
         </div>
       )}
 
-      {/* PRIMARY MICROPHONE ORB + SYMMETRIC WAVEFORM WINGS */}
+      {/* PRIMARY REAL MICROPHONE ORB + LIVE WEB AUDIO WAVEFORM WINGS */}
       {inputMode === 'microphone' && voiceState !== 'TRANSCRIPT_REVIEW' && (
         <div
           className={`flex flex-col items-center w-full ${
@@ -776,8 +783,8 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
               isHero
                 ? 'gap-5 sm:gap-6'
                 : isMedium
-                ? 'gap-4 sm:gap-5'
-                : 'gap-3.5 sm:gap-4'
+                  ? 'gap-4 sm:gap-5'
+                  : 'gap-3.5 sm:gap-4'
             }`}
           >
             {renderWaveformWing(false)}
@@ -788,8 +795,8 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
                   isHero
                     ? 'p-3 bg-white shadow-[0_12px_36px_rgba(18,112,62,0.15)] ring-[10px] ring-[#ECF7F0]'
                     : isMedium
-                    ? 'p-2.5 bg-white shadow-[0_10px_28px_rgba(18,112,62,0.14)] ring-[8px] ring-[#EDF7F1]'
-                    : 'p-2 bg-white/85 shadow-[0_6px_20px_rgba(18,112,62,0.14)] ring-[6px] ring-white/55'
+                      ? 'p-2.5 bg-white shadow-[0_10px_28px_rgba(18,112,62,0.14)] ring-[8px] ring-[#EDF7F1]'
+                      : 'p-2 bg-white/85 shadow-[0_6px_20px_rgba(18,112,62,0.14)] ring-[6px] ring-white/55'
                 }`}
               >
                 <motion.button
@@ -804,8 +811,8 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
                     isHero
                       ? 'w-[96px] h-[96px]'
                       : isMedium
-                      ? 'w-[76px] h-[76px]'
-                      : 'w-[60px] h-[60px]'
+                        ? 'w-[76px] h-[76px]'
+                        : 'w-[60px] h-[60px]'
                   }`}
                 >
                   <Mic
@@ -813,8 +820,8 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
                       isHero
                         ? 'w-10 h-10 stroke-[2]'
                         : isMedium
-                        ? 'w-8 h-8 stroke-[2]'
-                        : 'w-7 h-7 stroke-[2]'
+                          ? 'w-8 h-8 stroke-[2]'
+                          : 'w-7 h-7 stroke-[2]'
                     }
                   />
                 </motion.button>
@@ -842,8 +849,8 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
                     isHero
                       ? 'p-3 bg-white shadow-[0_12px_36px_rgba(225,29,72,0.18)] ring-[10px] ring-rose-500/10'
                       : isMedium
-                      ? 'p-2.5 bg-white shadow-[0_10px_28px_rgba(225,29,72,0.16)] ring-[8px] ring-rose-500/10'
-                      : 'p-2 bg-white/90 shadow-[0_6px_20px_rgba(225,29,72,0.16)] ring-[6px] ring-rose-500/10'
+                        ? 'p-2.5 bg-white shadow-[0_10px_28px_rgba(225,29,72,0.16)] ring-[8px] ring-rose-500/10'
+                        : 'p-2 bg-white/90 shadow-[0_6px_20px_rgba(225,29,72,0.16)] ring-[6px] ring-rose-500/10'
                   }`}
                 >
                   <motion.button
@@ -855,8 +862,8 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
                       isHero
                         ? 'w-[96px] h-[96px]'
                         : isMedium
-                        ? 'w-[76px] h-[76px]'
-                        : 'w-[60px] h-[60px]'
+                          ? 'w-[76px] h-[76px]'
+                          : 'w-[60px] h-[60px]'
                     }`}
                   >
                     <Square
@@ -864,8 +871,8 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
                         isHero
                           ? 'w-8 h-8 fill-white'
                           : isMedium
-                          ? 'w-6 h-6 fill-white'
-                          : 'w-5 h-5 fill-white'
+                            ? 'w-6 h-6 fill-white'
+                            : 'w-5 h-5 fill-white'
                       }
                     />
                   </motion.button>
@@ -879,8 +886,8 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
                   isHero
                     ? 'w-[108px] h-[108px]'
                     : isMedium
-                    ? 'w-[88px] h-[88px]'
-                    : 'w-[72px] h-[72px]'
+                      ? 'w-[88px] h-[88px]'
+                      : 'w-[72px] h-[72px]'
                 }`}
               >
                 <RefreshCw className="w-7 h-7 text-[#148343] animate-spin" />
@@ -890,51 +897,55 @@ export const VoiceInput: React.FC<VoiceInputProps> = ({
             {renderWaveformWing(true)}
           </div>
 
+          {/* Live Interim Speech Preview while recording */}
+          {voiceState === 'RECORDING' && livePreviewText && (
+            <p className="mt-2 px-3 py-1 rounded-[12px] bg-white/90 text-[12px] font-semibold text-[#148343] max-w-[300px] text-center leading-snug apple-shadow-xs">
+              “{livePreviewText}”
+            </p>
+          )}
+
           {/* Caption & Duration Pill */}
           <div
             className={`flex flex-col items-center text-center ${
-              isHero ? 'mt-4' : isMedium ? 'mt-2.5' : 'mt-2'
+              isHero ? 'mt-3.5' : isMedium ? 'mt-2.5' : 'mt-2'
             }`}
           >
             <span
               className={`${
                 isHero
-                  ? 'text-[15.5px] font-medium text-[#525E57]'
+                  ? 'text-[15px] font-medium text-[#525E57]'
                   : isMedium
-                  ? 'text-[13.5px] font-medium text-[#525E57]'
-                  : 'text-[12.5px] font-medium text-[#4E5B53]'
+                    ? 'text-[13.5px] font-medium text-[#525E57]'
+                    : 'text-[12.5px] font-medium text-[#4E5B53]'
               } tabular-nums`}
             >
               {voiceState === 'IDLE' && defaultIdleText}
               {voiceState === 'RECORDING' &&
-                `Listening ${formatTime(elapsedSeconds)} · Tap to finish`}
+                `Recording ${formatTime(elapsedSeconds)} · Tap square to finish`}
               {voiceState === 'PAUSED' && `Paused ${formatTime(elapsedSeconds)}`}
-              {voiceState === 'PROCESSING' && 'Transcribing speech...'}
-              {voiceState === 'EVALUATING' && 'Coaching your thought...'}
+              {voiceState === 'PROCESSING' && 'Transcribing with Gemini...'}
+              {voiceState === 'EVALUATING' && 'Gemini Coach evaluating...'}
             </span>
 
             {isHero && targetDurationLabel && voiceState === 'IDLE' && (
-              <div className="mt-3 px-4 py-2 rounded-full bg-[#F3F4F2] inline-flex items-center gap-2 text-[13px] font-medium text-[#47534C]">
-                <Timer className="w-4 h-4 text-[#47534C] stroke-[1.9]" />
+              <div className="mt-2.5 px-4 py-1.5 rounded-full bg-[#F3F4F2] inline-flex items-center gap-2 text-[12.5px] font-medium text-[#47534C]">
+                <Timer className="w-3.5 h-3.5 text-[#47534C] stroke-[1.9]" />
                 <span>{targetDurationLabel}</span>
               </div>
             )}
 
-            {!hideInlineActions &&
-              !hideUtilityPills &&
-              !isHero &&
-              voiceState === 'IDLE' && (
-                <div className="flex flex-wrap items-center justify-center gap-2 mt-2.5">
-                  <button
-                    type="button"
-                    onClick={() => switchToTyping(typingPrefill)}
-                    className="h-8 px-3 rounded-full bg-[#F3F4F2] hover:bg-[#EAECE9] text-[#4E5A53] text-[11.5px] font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-                  >
-                    <Keyboard className="w-3.5 h-3.5 text-[#67736C] shrink-0" />
-                    <span>Type instead</span>
-                  </button>
-                </div>
-              )}
+            {!hideInlineActions && !hideUtilityPills && voiceState === 'IDLE' && (
+              <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={() => switchToTyping(typingPrefill)}
+                  className="h-8 px-3 rounded-full bg-[#F3F4F2] hover:bg-[#EAECE9] text-[#4E5A53] text-[11.5px] font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <Keyboard className="w-3.5 h-3.5 text-[#67736C] shrink-0" />
+                  <span>Type instead</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

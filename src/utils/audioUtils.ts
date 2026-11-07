@@ -1,3 +1,5 @@
+import { apiFetch } from '../services/apiClient';
+
 /**
  * Pronunciation audio player using browser SpeechSynthesis with server TTS fallback.
  */
@@ -15,7 +17,11 @@ export async function playPronunciation(text: string): Promise<void> {
       // Pick high quality voice if available
       const voices = window.speechSynthesis.getVoices();
       const preferredVoice = voices.find(
-        (v) => (v.lang.startsWith('en') && (v.name.includes('Natural') || v.name.includes('Samantha') || v.name.includes('Google')))
+        (v) =>
+          v.lang.startsWith('en') &&
+          (v.name.includes('Natural') ||
+            v.name.includes('Samantha') ||
+            v.name.includes('Google'))
       );
       if (preferredVoice) {
         utterance.voice = preferredVoice;
@@ -30,16 +36,17 @@ export async function playPronunciation(text: string): Promise<void> {
 
   // Fallback to server Gemini TTS endpoint
   try {
-    const res = await fetch('/api/tts', {
+    const res = await apiFetch('/api/tts', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text }),
     });
 
     if (res.ok) {
       const data = await res.json();
       if (data.audioBase64) {
-        const audio = new Audio(`data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`);
+        const audio = new Audio(
+          `data:${data.mimeType || 'audio/wav'};base64,${data.audioBase64}`
+        );
         await audio.play();
       }
     }

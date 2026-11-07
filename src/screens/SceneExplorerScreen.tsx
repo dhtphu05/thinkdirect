@@ -17,7 +17,6 @@ import {
   UserLevel,
 } from '../types';
 import { PRACTICE_CONTEXTS } from '../services/practiceAdapters';
-import { getSceneForContextKey } from '../data/sampleSceneData';
 import { WordDetailSheet } from '../components/WordDetailSheet';
 import { playPronunciation } from '../utils/audioUtils';
 import { RadiantRays } from '../components/RadiantRays';
@@ -31,8 +30,8 @@ import { MethodGuideSheet } from '../components/ui/MethodGuideSheet';
 interface SceneExplorerScreenProps {
   scene: SceneData;
   userLevel?: UserLevel;
-  autoMode?: boolean;
-  onToggleAuto?: () => void;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
   onStartSpeaking: (
     contextKey?: PracticeContextKey,
     initialRootThought?: string,
@@ -56,8 +55,8 @@ function getClampedPinStyle(
   const fallback = FALLBACK_COORDS[idx % FALLBACK_COORDS.length];
   const rawX = typeof obj.xPercent === 'number' ? obj.xPercent : fallback.x;
   const rawY = typeof obj.yPercent === 'number' ? obj.yPercent : fallback.y;
-  const clampedX = Math.min(80, Math.max(20, rawX));
-  const clampedY = Math.min(78, Math.max(18, rawY));
+  const clampedX = Math.min(82, Math.max(18, rawX));
+  const clampedY = Math.min(80, Math.max(18, rawY));
   return {
     left: `${clampedX}%`,
     top: `${clampedY}%`,
@@ -66,33 +65,36 @@ function getClampedPinStyle(
 
 function inferInitialContextKey(title: string): PracticeContextKey {
   const lower = title.toLowerCase();
-  if (lower.includes('coffee') || lower.includes('morning') || lower.includes('drink') || lower.includes('rain') || lower.includes('café')) {
+  if (
+    lower.includes('coffee') ||
+    lower.includes('morning') ||
+    lower.includes('drink') ||
+    lower.includes('rain') ||
+    lower.includes('café')
+  ) {
     return 'MORNING_COFFEE';
   }
-  if (lower.includes('plan') || lower.includes('week') || lower.includes('deadline') || lower.includes('lesson') || lower.includes('evening')) {
+  if (
+    lower.includes('plan') ||
+    lower.includes('week') ||
+    lower.includes('deadline') ||
+    lower.includes('lesson') ||
+    lower.includes('evening')
+  ) {
     return 'PLANNING_DAY';
   }
   return 'STUDY_WORKSPACE';
 }
 
-const BASE_SAMPLE_TITLES = new Set([
-  'University Study Workspace',
-  'Morning Routine & Coffee',
-  'Planning My Study Week',
-]);
-
 export const SceneExplorerScreen: React.FC<SceneExplorerScreenProps> = ({
   scene,
   userLevel = 'B1',
-  autoMode: externalAutoMode,
-  onToggleAuto,
+  apiKeyConnected,
+  onOpenApiSettings,
   onStartSpeaking,
   onBack,
 }) => {
   const selectedContextKey = inferInitialContextKey(scene.title);
-  const [localAutoMode, setLocalAutoMode] = useState<boolean>(true);
-  const autoMode =
-    typeof externalAutoMode === 'boolean' ? externalAutoMode : localAutoMode;
 
   const [isEditingStarter, setIsEditingStarter] = useState<boolean>(false);
   const [customStarter, setCustomStarter] = useState<string>('');
@@ -103,28 +105,20 @@ export const SceneExplorerScreen: React.FC<SceneExplorerScreenProps> = ({
     DetectedObject | ContextualExpression | null
   >(null);
 
-  const isCustomCapturedScene = !scene.isSample;
-  const isCustomPromptScene =
-    scene.isSample && !BASE_SAMPLE_TITLES.has(scene.title);
-  const useProvidedSceneDirectly = isCustomCapturedScene || isCustomPromptScene;
+  const displayScene = scene;
 
-  const displayScene = useProvidedSceneDirectly
-    ? scene
-    : getSceneForContextKey(selectedContextKey);
-
-  const activeStarterThought =
+  const fallbackStarter =
     PRACTICE_CONTEXTS[selectedContextKey]?.initialThought ||
     PRACTICE_CONTEXTS.STUDY_WORKSPACE.initialThought;
 
-  const defaultStarter = useProvidedSceneDirectly
-    ? scene.initialSuggestedThought ||
-      scene.objects[0]?.contextualSentence ||
-      activeStarterThought
-    : activeStarterThought;
+  const defaultStarter =
+    displayScene.initialSuggestedThought ||
+    displayScene.objects[0]?.contextualSentence ||
+    fallbackStarter;
 
   const initialThoughtToUse = customStarter.trim() || defaultStarter;
 
-  const displayObjects = displayScene.objects.slice(0, 4);
+  const displayObjects = displayScene.objects.slice(0, 5);
   const displayExpressions = displayScene.suggestedExpressions.slice(0, 3);
 
   const markLabelSpoken = (key: string) => {
@@ -167,18 +161,16 @@ export const SceneExplorerScreen: React.FC<SceneExplorerScreenProps> = ({
             onBack
               ? onBack
               : () =>
-                  onStartSpeaking(selectedContextKey, initialThoughtToUse)
+                  onStartSpeaking(
+                    selectedContextKey,
+                    initialThoughtToUse,
+                    displayScene
+                  )
           }
           centerMode="brand"
-          rightMode="auto-zap"
-          autoActive={autoMode}
-          onToggleAuto={() => {
-            if (onToggleAuto) {
-              onToggleAuto();
-            } else {
-              setLocalAutoMode((v) => !v);
-            }
-          }}
+          rightMode={onOpenApiSettings ? 'api-status' : 'none'}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
         />
 
         <MethodRoadmapStrip
@@ -192,7 +184,7 @@ export const SceneExplorerScreen: React.FC<SceneExplorerScreenProps> = ({
               <Tag className="w-3 h-3 stroke-[2.4]" />
               <span>Method 0 · Direct Labeling</span>
             </span>
-            <span className="text-[10.5px] font-bold text-[#5A6760]">
+            <span className="text-[10.5px] font-bold text-[#5A6760] truncate max-w-[190px]">
               {displayScene.title}
             </span>
           </div>
@@ -203,50 +195,63 @@ export const SceneExplorerScreen: React.FC<SceneExplorerScreenProps> = ({
           </h1>
           <p className="text-[12.5px] text-[#55625B] leading-[1.4]">
             {userLevel === 'A2'
-              ? 'Gắn nhãn trực tiếp (không dịch ngầm): Chạm đồ vật để nghe & đọc to cụm tiếng Anh, rồi mở rộng câu bên dưới.'
-              : 'Direct object-to-English link: Tap objects to hear & say them aloud — then enter Sentence Expansion.'}
+              ? 'Gắn nhãn trực tiếp (không dịch ngầm): Chạm đồ vật để nghe & đọc to cụm tiếng Anh, hoặc sửa câu gốc theo ý bạn.'
+              : 'Direct object-to-English link: Tap detected objects to hear & say them aloud — then grow your starter sentence.'}
           </p>
+
+          {displayScene.userGoal && (
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#EAF6EE] text-[#0E6D3B] text-[11px] font-bold w-fit mt-0.5">
+              <Goal className="w-3 h-3 stroke-[2.3] shrink-0" />
+              <span>Goal: {displayScene.userGoal}</span>
+            </div>
+          )}
         </div>
 
         {/* Scene Photo Card with Object-Anchored Floating Labels */}
         <div className="relative w-full aspect-[16/10] rounded-[24px] overflow-hidden bg-[#1D2621] apple-shadow-md">
-          <img
-            src={displayScene.imageUrl}
-            alt={displayScene.title}
-            className="w-full h-full object-cover"
-          />
-          <div className="absolute inset-0 bg-gradient-to-t from-black/25 via-transparent to-black/20 pointer-events-none" />
+          {displayScene.imageUrl ? (
+            <img
+              src={displayScene.imageUrl}
+              alt={displayScene.title}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <div className="w-full h-full bg-gradient-to-br from-[#173024] to-[#0D1E16]" />
+          )}
+          <div className="absolute inset-0 bg-gradient-to-t from-black/30 via-transparent to-black/20 pointer-events-none" />
 
           {/* Active Label-Anything Micro-Habit Bar */}
-          <div className="absolute top-2.5 left-2.5 right-2.5 z-20 flex items-center justify-between gap-2 pointer-events-none">
-            <div className="bg-black/55 backdrop-blur-md text-white text-[11px] font-bold px-2.5 py-1 rounded-full inline-flex items-center gap-1.5 whitespace-nowrap">
-              {namedObjectsCount >= displayObjects.length ? (
-                <Check className="w-3 h-3 text-emerald-300 stroke-[2.8] shrink-0" />
-              ) : (
-                <Mic className="w-3 h-3 text-emerald-300 stroke-[2.2] shrink-0" />
-              )}
-              <span>
-                Say aloud · {namedObjectsCount}/{displayObjects.length}
-              </span>
-            </div>
+          {displayObjects.length > 0 && (
+            <div className="absolute top-2.5 left-2.5 right-2.5 z-20 flex items-center justify-between gap-2 pointer-events-none">
+              <div className="bg-black/55 backdrop-blur-md text-white text-[11px] font-bold px-2.5 py-1 rounded-full inline-flex items-center gap-1.5 whitespace-nowrap">
+                {namedObjectsCount >= displayObjects.length ? (
+                  <Check className="w-3 h-3 text-emerald-300 stroke-[2.8] shrink-0" />
+                ) : (
+                  <Mic className="w-3 h-3 text-emerald-300 stroke-[2.2] shrink-0" />
+                )}
+                <span>
+                  Say aloud · {namedObjectsCount}/{displayObjects.length}
+                </span>
+              </div>
 
-            {namedObjectsCount < displayObjects.length && (
-              <button
-                type="button"
-                onClick={handleQuickPracticeAllLabels}
-                className="pointer-events-auto bg-white/92 hover:bg-white text-[#148343] text-[11px] font-bold px-2.5 py-1 rounded-full inline-flex items-center gap-1 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
-              >
-                <Volume2 className="w-3 h-3 stroke-[2.2] shrink-0" />
-                <span>Hear all 4</span>
-              </button>
-            )}
-          </div>
+              {namedObjectsCount < displayObjects.length && (
+                <button
+                  type="button"
+                  onClick={handleQuickPracticeAllLabels}
+                  className="pointer-events-auto bg-white/92 hover:bg-white text-[#148343] text-[11px] font-bold px-2.5 py-1 rounded-full inline-flex items-center gap-1 shadow-xs transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <Volume2 className="w-3 h-3 stroke-[2.2] shrink-0" />
+                  <span>Hear all {displayObjects.length}</span>
+                </button>
+              )}
+            </div>
+          )}
 
           {displayObjects.map((obj, idx) => {
             const isNamed = spokenLabels.includes(obj.name.toLowerCase());
             return (
               <div
-                key={obj.name}
+                key={`${obj.name}_${idx}`}
                 style={getClampedPinStyle(obj, idx)}
                 className="absolute -translate-x-1/2 -translate-y-1/2 z-10 flex flex-col items-center"
               >
@@ -312,7 +317,7 @@ export const SceneExplorerScreen: React.FC<SceneExplorerScreenProps> = ({
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') setIsEditingStarter(false);
                     }}
-                    placeholder="e.g. I'm having coffee."
+                    placeholder="e.g. I'm ordering iced matcha."
                     autoFocus
                     className="mt-1 w-full h-9 rounded-[12px] bg-white px-3 text-[14px] font-bold text-[#101E17] apple-shadow-xs focus:outline-none focus:ring-2 focus:ring-[#148343]/25"
                   />

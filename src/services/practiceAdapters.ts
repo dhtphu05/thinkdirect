@@ -1,7 +1,8 @@
 /**
- * ThinkDirect V3 Practice Adapters — DevFest 2026
- * Supports both offline Video-Ready Happy Path (DemoPracticeAdapter)
- * and Live Gemini Coaching + Deterministic Guardrails (RealPracticeAdapter).
+ * ThinkDirect V3 Practice Adapters
+ * - RealPracticeAdapter: Live Gemini Coaching (`/api/coach-step`) grounded in ANY captured/uploaded
+ *   scene photo + deterministic 0ms SLA guardrails.
+ * - DemoPracticeAdapter: Deterministic reference adapter preserved for automated unit test suites.
  */
 
 import {
@@ -20,6 +21,18 @@ import {
   IdeaEvaluationResult,
   GOLDEN_DEMO_PATH,
 } from './speakingEngine';
+import { apiFetch } from './apiClient';
+
+export interface CoachExpansionEvaluationResult extends ExpansionEvaluationResult {
+  nextStepTitle?: string;
+  nextStepExample?: string;
+  nextStepSample?: string;
+}
+
+export interface SelfTalkEvaluationOptions {
+  beatStep?: number;
+  previousSentences?: string[];
+}
 
 export const PRACTICE_CONTEXTS: Record<PracticeContextKey, PracticeContextData> = {
   STUDY_WORKSPACE: {
@@ -38,6 +51,9 @@ export const PRACTICE_CONTEXTS: Record<PracticeContextKey, PracticeContextData> 
     whySample: GOLDEN_DEMO_PATH.stepC_why,
     howPrompt: 'How are you building it technically?',
     howSample: GOLDEN_DEMO_PATH.stepC_how,
+    pointPrompt: 'What is your main priority when building this feature?',
+    pointSample:
+      'I prefer building secure authentication before designing the rest of the app.',
     reasonPrompt: 'Why do you prefer building the authentication flow first?',
     reasonSample:
       'Because securing student accounts early keeps the rest of the app safe.',
@@ -101,6 +117,9 @@ export const PRACTICE_CONTEXTS: Record<PracticeContextKey, PracticeContextData> 
     whySample: 'Because I have two lectures and a team presentation to deliver.',
     howPrompt: 'How are you preparing before leaving home?',
     howSample: "I'm finishing my coffee while reviewing my presentation slides.",
+    pointPrompt: 'What do you value most about your morning routine?',
+    pointSample:
+      'I prefer having ten quiet minutes with coffee before morning class.',
     reasonPrompt: 'Why do you like having a quiet coffee routine before class?',
     reasonSample: 'Because ten calm minutes help me organize my thoughts before speaking.',
     examplePrompt: 'Give a concrete example of when this helped you.',
@@ -167,6 +186,9 @@ export const PRACTICE_CONTEXTS: Record<PracticeContextKey, PracticeContextData> 
     howPrompt: 'How will you tackle your checklist today?',
     howSample:
       "I'll start with the hardest assignment first while my mind is fresh.",
+    pointPrompt: 'What is your strategy for managing busy study days?',
+    pointSample:
+      'I prefer tackling my hardest assignment first in the morning.',
     reasonPrompt: 'Why do you prefer tackling the hardest task first?',
     reasonSample:
       'Because my concentration is sharpest in the morning before messages pile up.',
@@ -224,7 +246,7 @@ export interface IPracticeAdapter {
     previousThought: string,
     newAttempt: string,
     subStep: number
-  ) => Promise<ExpansionEvaluationResult>;
+  ) => Promise<CoachExpansionEvaluationResult>;
   evaluateIdeaTurn: (
     questionKey: IdeaQuestionKey,
     answer: string,
@@ -233,8 +255,17 @@ export interface IPracticeAdapter {
   evaluateWhy: (answer: string) => Promise<IdeaEvaluationResult>;
   evaluateHow: (answer: string, whyAnswer: string) => Promise<IdeaEvaluationResult>;
   evaluateSelfTalk: (
-    monologue: string
-  ) => Promise<{ isValid: boolean; feedback: string; connectorsFound: string[] }>;
+    monologue: string,
+    options?: SelfTalkEvaluationOptions
+  ) => Promise<{
+    isValid: boolean;
+    feedback: string;
+    connectorsFound: string[];
+    hintL1?: string;
+    hintL2?: string;
+    hintL3?: string;
+    vietnameseRescue?: string;
+  }>;
   evaluateRecall: (
     recall: string,
     hintsUsed: boolean,
@@ -249,8 +280,7 @@ export interface IPracticeAdapter {
 }
 
 /**
- * Demo Practice Adapter
- * Deterministic, instant, zero network dependency — ideal for Guided Demo & 1-take video recording.
+ * Deterministic Reference Adapter (used by unit test suites).
  */
 export class DemoPracticeAdapter implements IPracticeAdapter {
   mode: SessionMode = 'demo';
@@ -270,7 +300,7 @@ export class DemoPracticeAdapter implements IPracticeAdapter {
     previousThought: string,
     newAttempt: string,
     subStep: number
-  ): Promise<ExpansionEvaluationResult> {
+  ): Promise<CoachExpansionEvaluationResult> {
     const trimmed = newAttempt.trim().toLowerCase();
     if (
       trimmed === this.contextData.expansion1IncorrectSample.toLowerCase() ||
@@ -336,8 +366,9 @@ export class DemoPracticeAdapter implements IPracticeAdapter {
 
 /**
  * Real Practice Adapter
- * Runs fast local SLA guardrails first (0ms repetition catch), then queries backend
- * Gemini `/api/coach-step` grounded in the real captured scene, with graceful fallback.
+ * Grounds every stage in ANY captured/uploaded SceneData + `practiceBlueprint`,
+ * catches instant repetitions locally in 0ms, and calls Gemini `/api/coach-step`
+ * across all 4 speaking methods.
  */
 export class RealPracticeAdapter implements IPracticeAdapter {
   mode: SessionMode = 'real';
@@ -352,7 +383,74 @@ export class RealPracticeAdapter implements IPracticeAdapter {
       PRACTICE_CONTEXTS[contextKey] || PRACTICE_CONTEXTS.STUDY_WORKSPACE;
     this.activeScene = scene;
 
-    if (scene && !scene.isSample) {
+    if (scene?.practiceBlueprint) {
+      const bp = scene.practiceBlueprint;
+      const rung1 = bp.expansionRungs[0];
+      const rung2 = bp.expansionRungs[1];
+      const starter =
+        scene.initialSuggestedThought ||
+        scene.objects[0]?.contextualSentence ||
+        base.initialThought;
+      this.contextData = {
+        ...base,
+        title: scene.title,
+        topicLabel: scene.userGoal || scene.description || scene.title,
+        initialThought: starter,
+        expansion1Prompt: rung1 ? `Add ${rung1.focusCue}` : base.expansion1Prompt,
+        expansion1Sample: rung1?.sampleSentence || base.expansion1Sample,
+        expansion1IncorrectSample: starter
+          .toLowerCase()
+          .replace(/[^a-z0-9\s']/g, '')
+          .trim(),
+        expansion2Prompt: rung2 ? `Add ${rung2.focusCue}` : base.expansion2Prompt,
+        expansion2Sample: rung2?.sampleSentence || base.expansion2Sample,
+        whyPrompt: bp.fiveWOneH.whyPrompt,
+        whySample: bp.fiveWOneH.whySample,
+        howPrompt: bp.fiveWOneH.howPrompt,
+        howSample: bp.fiveWOneH.howSample,
+        pointPrompt: bp.preOpinion.pointPrompt,
+        pointSample: bp.preOpinion.pointSample,
+        reasonPrompt: bp.preOpinion.reasonPrompt,
+        reasonSample: bp.preOpinion.reasonSample,
+        examplePrompt: bp.preOpinion.examplePrompt,
+        exampleSample: bp.preOpinion.exampleSample,
+        selfTalkPrompt: bp.selfTalk.situationPrompt,
+        selfTalkMonologue: bp.selfTalk.fullMonologue,
+        independentRecallPrompt: bp.recall.prompt,
+        independentRecallSample: bp.recall.sampleSpeech,
+        thinkingPrompts: [
+          {
+            category: 'NOTICE',
+            categoryLabel: 'Notice',
+            question: 'What is happening right in front of me?',
+            helperText: bp.selfTalk.beat1Notice,
+          },
+          {
+            category: 'QUESTION',
+            categoryLabel: 'Question',
+            question: 'What small challenge or risk should I watch for?',
+            helperText: 'Ask yourself one quick question in English.',
+          },
+          {
+            category: 'CONSIDER',
+            categoryLabel: 'Consider',
+            question: 'What might happen or cause an issue?',
+            helperText: bp.selfTalk.beat2Hypothesize,
+          },
+          {
+            category: 'DECIDE',
+            categoryLabel: 'Decide',
+            question: 'What is my immediate first move?',
+            helperText: bp.selfTalk.beat3Decide,
+          },
+        ],
+        speakingStrength: `You built a natural, connected English story directly from "${scene.title}".`,
+        actionableImprovement:
+          'Link your observation and next action smoothly using connectors like "so first, I\'ll..." or "in case...".',
+        nextPracticeSuggestion:
+          'Snap or upload another photo from your day and express 3 connected ideas without hints.',
+      };
+    } else if (scene && !scene.isSample) {
       const firstObj = scene.objects[0]?.name?.toLowerCase() || 'item';
       const firstExpr =
         scene.suggestedExpressions[0]?.phrase || 'focus on my task';
@@ -384,32 +482,40 @@ export class RealPracticeAdapter implements IPracticeAdapter {
   }
 
   private get sceneLabel(): string {
+    if (this.activeScene?.userGoal) {
+      return `${this.activeScene.title} (Goal: ${this.activeScene.userGoal})`;
+    }
     return this.activeScene?.title || this.contextData.title;
+  }
+
+  private get sceneObjects(): string[] {
+    return (this.activeScene?.objects || []).map((o) => o.name);
   }
 
   async evaluateExpansion(
     previousThought: string,
     newAttempt: string,
     subStep: number
-  ): Promise<ExpansionEvaluationResult> {
+  ): Promise<CoachExpansionEvaluationResult> {
     const local = evaluateExpansionAttempt(
       previousThought,
       newAttempt,
       subStep,
       this.sceneLabel
     );
-    // Immediately block repetition or empty attempts without waiting on network
-    if (!local.isValid || typeof fetch === 'undefined') {
+    // Catch instant repetition or empty speech in 0ms without network latency
+    if (!local.isValid || typeof window === 'undefined') {
       return local;
     }
 
     try {
-      const res = await fetch('/api/coach-step', {
+      const res = await apiFetch('/api/coach-step', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           stage: 'EXPANSION',
           sceneContext: this.sceneLabel,
+          sceneObjects: this.sceneObjects,
           previousSentences: [previousThought],
           latestTranscript: newAttempt,
           stepNumber: subStep,
@@ -430,6 +536,9 @@ export class RealPracticeAdapter implements IPracticeAdapter {
         hintL2: data.hintL2 || local.hintL2,
         hintL3: data.hintL3 || local.hintL3,
         vietnameseRescue: data.vietnameseRescue || local.vietnameseRescue,
+        nextStepTitle: data.nextStepTitle || undefined,
+        nextStepExample: data.nextStepExample || undefined,
+        nextStepSample: data.nextStepSample || undefined,
       };
     } catch {
       return local;
@@ -447,12 +556,12 @@ export class RealPracticeAdapter implements IPracticeAdapter {
       priorTurnAnswer,
       this.sceneLabel
     );
-    if (!local.isValid || typeof fetch === 'undefined') {
+    if (!local.isValid || typeof window === 'undefined') {
       return local;
     }
 
     try {
-      const res = await fetch('/api/coach-step', {
+      const res = await apiFetch('/api/coach-step', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -460,6 +569,11 @@ export class RealPracticeAdapter implements IPracticeAdapter {
           questionKey,
           priorTurnAnswer,
           sceneContext: this.sceneLabel,
+          sceneObjects: this.sceneObjects,
+          previousSentences: [
+            this.contextData.initialThought,
+            priorTurnAnswer,
+          ].filter(Boolean),
           latestTranscript: answer,
         }),
       });
@@ -488,8 +602,56 @@ export class RealPracticeAdapter implements IPracticeAdapter {
     return this.evaluateIdeaTurn('How', answer, whyAnswer);
   }
 
-  async evaluateSelfTalk(monologue: string) {
-    return evaluateSelfTalkMonologue(monologue);
+  async evaluateSelfTalk(
+    monologue: string,
+    options?: SelfTalkEvaluationOptions
+  ) {
+    const beatStep = options?.beatStep;
+    const clean = monologue.trim();
+    const wordCount = clean.split(/\s+/).filter(Boolean).length;
+
+    const local = beatStep
+      ? {
+          isValid: wordCount >= 3,
+          feedback:
+            wordCount >= 3
+              ? `Great Beat ${beatStep} thought.`
+              : `Say one complete English sentence for Beat ${beatStep}.`,
+          connectorsFound: [] as string[],
+        }
+      : evaluateSelfTalkMonologue(monologue);
+
+    if (!local.isValid || typeof window === 'undefined') {
+      return local;
+    }
+
+    try {
+      const res = await apiFetch('/api/coach-step', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stage: 'GUIDED_SELF_TALK',
+          beatStep,
+          sceneContext: this.sceneLabel,
+          sceneObjects: this.sceneObjects,
+          previousSentences: options?.previousSentences || [],
+          latestTranscript: monologue,
+        }),
+      });
+      if (!res.ok) return local;
+      const data = await res.json();
+      return {
+        ...local,
+        isValid: Boolean(data.isValid ?? local.isValid),
+        feedback: data.feedback || local.feedback,
+        hintL1: data.hintL1,
+        hintL2: data.hintL2,
+        hintL3: data.hintL3,
+        vietnameseRescue: data.vietnameseRescue,
+      };
+    } catch {
+      return local;
+    }
   }
 
   async evaluateRecall(
@@ -497,6 +659,43 @@ export class RealPracticeAdapter implements IPracticeAdapter {
     hintsUsed: boolean,
     referenceUtterances: string[] = []
   ) {
-    return evaluateIndependentRecall(recall, hintsUsed, referenceUtterances);
+    const local = evaluateIndependentRecall(
+      recall,
+      hintsUsed,
+      referenceUtterances
+    );
+    if (!local.isValid || typeof window === 'undefined') {
+      return local;
+    }
+
+    try {
+      const res = await apiFetch('/api/coach-step', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stage: 'INDEPENDENT_RECALL',
+          sceneContext: this.sceneLabel,
+          sceneObjects: this.sceneObjects,
+          previousSentences: referenceUtterances,
+          latestTranscript: recall,
+        }),
+      });
+      if (!res.ok) return local;
+      const data = await res.json();
+      if (!data.isValid) {
+        return {
+          ...local,
+          isValid: false,
+          improvement: data.feedback || local.improvement,
+        };
+      }
+      return {
+        ...local,
+        strength: data.feedback || local.strength,
+        improvement: data.hintL1 || local.improvement,
+      };
+    } catch {
+      return local;
+    }
   }
 }

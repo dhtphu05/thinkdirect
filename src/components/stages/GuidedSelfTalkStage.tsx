@@ -13,7 +13,6 @@ import {
 import {
   InputMode,
   SceneData,
-  SessionMode,
   ThinkingPrompt,
   UserLevel,
 } from '../../types';
@@ -28,8 +27,15 @@ interface GuidedSelfTalkStageProps {
   scene: SceneData;
   storySentences?: string[];
   userLevel?: UserLevel;
-  autoMode: boolean;
-  onToggleAuto: () => void;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
+  hintVocabulary?: string[];
+  explicitBeats?: [string, string, string];
+  onValidateBeat?: (
+    text: string,
+    beatStep: number,
+    priorBeats: string[]
+  ) => Promise<{ isValid: boolean; feedback: string }>;
   onBack: () => void;
   selfTalkPrompt: string;
   selfTalkMonologue: string;
@@ -42,66 +48,55 @@ interface GuidedSelfTalkStageProps {
     durationSeconds?: number
   ) => void;
   isSubmitting: boolean;
-  sessionMode: SessionMode;
   onOpenHint: () => void;
   onOpenConceptBridge: () => void;
 }
 
-function splitMonologueIntoThreeBeats(monologue: string): [string, string, string] {
+function splitMonologueIntoThreeBeats(
+  monologue: string
+): [string, string, string] {
   const sentences = monologue
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
 
   if (sentences.length >= 3) {
-    return [
-      sentences[0],
-      sentences[1],
-      sentences.slice(2).join(' '),
-    ];
+    return [sentences[0], sentences[1], sentences.slice(2).join(' ')];
   }
 
   if (sentences.length === 2) {
     const firstParts = sentences[0].split(/,\s+and\s+/i);
     if (firstParts.length >= 2) {
-      const b1 = /[.!?]$/.test(firstParts[0]) ? firstParts[0] : `${firstParts[0]}.`;
+      const b1 = /[.!?]$/.test(firstParts[0])
+        ? firstParts[0]
+        : `${firstParts[0]}.`;
       const b2Raw = firstParts.slice(1).join(', and ');
       const b2 =
         b2Raw.charAt(0).toUpperCase() +
         b2Raw.slice(1).replace(/[.!?]*$/, '.');
       return [b1, b2, sentences[1]];
     }
-    const secondParts = sentences[1].split(/\s+and\s+(?=draft|review|check|leave|start)/i);
-    if (secondParts.length >= 2) {
-      const b2 = /[.!?]$/.test(secondParts[0]) ? secondParts[0] : `${secondParts[0]}.`;
-      const b3Raw = `First, I'll ${secondParts.slice(1).join(' and ')}`;
-      return [sentences[0], b2, b3Raw];
-    }
   }
 
   return [
-    "Something isn't working as expected right now.",
-    'Maybe a small configuration or timing issue came up.',
-    "First, I'll check the main step carefully.",
+    'Right now, I notice an important detail in front of me.',
+    'Maybe a small delay or challenge could come up if I rush.',
+    "First, I'll handle the main step carefully.",
   ];
 }
 
 function detectThreeBeats(text: string): [boolean, boolean, boolean] {
   const trimmed = text.trim();
   const words = trimmed.split(/\s+/).filter(Boolean);
-  if (words.length < 3) return [false, false, false];
+  if (words.length < 4) return [false, false, false];
 
-  const beat1 =
-    words.length >= 4 &&
-    /isn't working|not working|working|issue|bug|minutes|desk|assignments|focus|coffee|login|problem|right now|have|today|rain|roads|blocked/i.test(
-      trimmed
-    );
+  const beat1 = words.length >= 4;
   const beat2 =
-    /\b(maybe|might|perhaps|could|probably|possible|traffic|expired|drain|think|because|rush|if)\b/i.test(
+    /\b(maybe|might|perhaps|could|probably|possible|in case|wonder|think|because|if|seem|looks like)\b/i.test(
       trimmed
     );
   const beat3 =
-    /\b(should|will|i'll|first|next|going to|check|pack|review|silence|draft|start|sync|send|leave|join|write)\b/i.test(
+    /\b(should|will|i'll|first|next|going to|let me|need to|plan to|check|start|review|make sure)\b/i.test(
       trimmed
     );
 
@@ -112,8 +107,11 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
   scene,
   storySentences = [],
   userLevel = 'B1',
-  autoMode,
-  onToggleAuto,
+  apiKeyConnected,
+  onOpenApiSettings,
+  hintVocabulary = [],
+  explicitBeats,
+  onValidateBeat,
   onBack,
   selfTalkPrompt,
   selfTalkMonologue,
@@ -121,13 +119,13 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
   onPlaySentence,
   onSubmitAttempt,
   isSubmitting,
-  sessionMode,
   onOpenHint,
   onOpenConceptBridge,
 }) => {
   const [practiceStyle, setPracticeStyle] = useState<'beats' | 'flow'>('beats');
   const [beatStep, setBeatStep] = useState<number>(1);
   const [spokenBeats, setSpokenBeats] = useState<string[]>([]);
+  const [isValidatingBeat, setIsValidatingBeat] = useState<boolean>(false);
   const [localWarning, setLocalWarning] = useState<string | null>(null);
   const [selectedStarter, setSelectedStarter] = useState<string>('');
   const [showSample, setShowSample] = useState<boolean>(false);
@@ -142,8 +140,11 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
   }, [selfTalkMonologue]);
 
   const beatSamples = useMemo(
-    () => splitMonologueIntoThreeBeats(selfTalkMonologue),
-    [selfTalkMonologue]
+    () =>
+      explicitBeats && explicitBeats.every(Boolean)
+        ? explicitBeats
+        : splitMonologueIntoThreeBeats(selfTalkMonologue),
+    [explicitBeats, selfTalkMonologue]
   );
 
   const flowBeats = useMemo(
@@ -156,14 +157,14 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
       num: 1,
       code: 'NOTICE',
       label: "Observe what's happening",
-      starters: ['Right now,...', "Something isn't working..."],
+      starters: ['Right now,...', 'Looking at this,...'],
       sample: beatSamples[0],
     },
     {
       num: 2,
       code: 'HYPOTHESIZE',
-      label: 'Wonder aloud why',
-      starters: ['Maybe...', 'It might be...'],
+      label: 'Wonder aloud why / what if',
+      starters: ['Maybe...', 'It might...'],
       sample: beatSamples[1],
     },
     {
@@ -177,7 +178,7 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
 
   const activeBeatCfg = beatConfigs[Math.min(beatStep - 1, 2)];
 
-  const handleBeatSubmit = (
+  const handleBeatSubmit = async (
     text: string,
     source: InputMode,
     durationSeconds = 6
@@ -189,6 +190,20 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
         `Say one complete English thought for Beat ${beatStep} (${activeBeatCfg.code}).`
       );
       return;
+    }
+
+    if (onValidateBeat) {
+      setIsValidatingBeat(true);
+      try {
+        const res = await onValidateBeat(clean, beatStep, spokenBeats);
+        if (!res.isValid) {
+          setLocalWarning(res.feedback);
+          setIsValidatingBeat(false);
+          return;
+        }
+      } finally {
+        setIsValidatingBeat(false);
+      }
     }
 
     setLocalWarning(null);
@@ -206,7 +221,7 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
     onSubmitAttempt(
       combinedMonologue,
       source,
-      Math.max(20, durationSeconds * 3)
+      Math.max(18, durationSeconds * 3)
     );
   };
 
@@ -228,9 +243,9 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
         <PracticeHeader
           onBack={handleInternalBack}
           centerMode="brand"
-          rightMode="auto-sparkles"
-          autoActive={autoMode}
-          onToggleAuto={onToggleAuto}
+          rightMode={onOpenApiSettings ? 'api-status' : 'none'}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
         />
 
         <MethodRoadmapStrip
@@ -285,7 +300,7 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
           <p className="text-[12px] text-[#4E5B54] leading-snug">
             {userLevel === 'A2'
               ? 'Tự độc thoại 1 mình không cần bạn luyện: Nói thành tiếng qua 3 nhịp phản xạ Notice → Hypothesize → Decide.'
-              : 'Solo English reflex (no partner needed): Talk yourself through a real snag in 3 thinking beats.'}
+              : 'Solo English reflex (no partner needed): Talk yourself through this moment in 3 thinking beats.'}
           </p>
         </div>
 
@@ -538,12 +553,11 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
                 ? `Speak starting with "${selectedStarter}..."`
                 : `Speak Self-Talk Beat ${beatStep} of 3 (${activeBeatCfg.code})`
             }
-            typingPrefill={selectedStarter}
+            typingPrefill={selectedStarter ? `${selectedStarter} ` : ''}
+            sceneContext={scene.title}
+            hintVocabulary={hintVocabulary}
             onSubmit={handleBeatSubmit}
-            sampleResponse={activeBeatCfg.sample}
-            isSubmitting={isSubmitting}
-            isDemoMode={sessionMode === 'demo'}
-            autoHappyPath={autoMode}
+            isSubmitting={isSubmitting || isValidatingBeat}
             placeholder={`Say your ${activeBeatCfg.code.toLowerCase()} thought out loud...`}
           />
         ) : (
@@ -552,12 +566,11 @@ export const GuidedSelfTalkStage: React.FC<GuidedSelfTalkStageProps> = ({
             size="compact"
             idleLabel="Speak all 3 Self-Talk beats in 1 flow"
             targetDurationLabel="Aim for 20–40 seconds"
+            sceneContext={scene.title}
+            hintVocabulary={hintVocabulary}
             onSubmit={onSubmitAttempt}
             onDraftChange={setDraft}
-            sampleResponse={selfTalkMonologue}
             isSubmitting={isSubmitting}
-            isDemoMode={sessionMode === 'demo'}
-            autoHappyPath={autoMode}
             placeholder="Notice what's happening, hypothesize why, and decide your first move..."
           />
         )}

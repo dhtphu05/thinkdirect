@@ -136,6 +136,63 @@ export interface ContextualExpression {
   vietnameseMeaning?: string;
 }
 
+export interface ExpansionRungBlueprint {
+  stepNum: 1 | 2 | 3;
+  focusCue: string;
+  exampleChunk: string;
+  sampleSentence: string;
+}
+
+export interface ScenePracticeBlueprint {
+  expansionRungs: [
+    ExpansionRungBlueprint,
+    ExpansionRungBlueprint,
+    ExpansionRungBlueprint
+  ];
+  fiveWOneH: {
+    whyPrompt: string;
+    whySample: string;
+    howPrompt: string;
+    howSample: string;
+  };
+  preOpinion: {
+    pointPrompt: string;
+    pointSample: string;
+    reasonPrompt: string;
+    reasonSample: string;
+    examplePrompt: string;
+    exampleSample: string;
+  };
+  selfTalk: {
+    situationPrompt: string;
+    beat1Notice: string;
+    beat2Hypothesize: string;
+    beat3Decide: string;
+    fullMonologue: string;
+  };
+  recall: {
+    prompt: string;
+    sampleSpeech: string;
+    sprintStep1Sample: string;
+    sprintStep2Sample: string;
+  };
+  quickVietnameseBridgeChips: string[];
+}
+
+export interface ApiHealthStatus {
+  status: 'ok' | 'error';
+  hasApiKey: boolean;
+  keySource: 'env' | 'runtime' | 'header' | 'none';
+  maskedKey?: string;
+  models: {
+    vision: string;
+    stt: string;
+    coach: string;
+    tts: string;
+  };
+  timestamp: number;
+}
+
 export interface SceneData {
   title: string;
   description: string;
@@ -146,6 +203,8 @@ export interface SceneData {
   suggestedFramework: FrameworkType;
   isSample: boolean;
   initialSuggestedThought?: string;
+  userGoal?: string;
+  practiceBlueprint?: ScenePracticeBlueprint;
 }
 
 export interface SpeakingAttempt {

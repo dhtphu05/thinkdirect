@@ -11,6 +11,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { ThinkingPrompt, ConceptBridgeResult, UserLevel } from '../types';
 import { resolveConceptBridgeFallback } from '../services/speakingEngine';
+import { apiFetch } from '../services/apiClient';
 import { playPronunciation } from '../utils/audioUtils';
 import { SurfaceCard } from './ui/SurfaceCard';
 import { PillButton } from './ui/PillButton';
@@ -27,6 +28,7 @@ interface HintSheetProps {
   level3?: string;
   vietnameseRescue?: string;
   sceneContext?: string;
+  quickVietnameseIdeas?: string[];
   onUseHint?: (level: 1 | 2 | 3, isVietnameseRescue: boolean) => void;
 }
 
@@ -34,19 +36,19 @@ const DEFAULT_PROMPTS: ThinkingPrompt[] = [
   {
     category: 'NOTICE',
     categoryLabel: 'Notice',
-    question: "What isn't working or happening right now?",
+    question: "What is happening right in front of you?",
     helperText: 'State your active focus or situation in one simple sentence.',
   },
   {
     category: 'QUESTION',
     categoryLabel: 'Question',
-    question: 'Why might this be happening?',
+    question: 'Why does this moment or task matter?',
     helperText: 'Ask yourself a short question in English.',
   },
   {
     category: 'CONSIDER',
     categoryLabel: 'Consider',
-    question: 'What is a likely cause or option?',
+    question: 'What is a likely challenge or option?',
     helperText: "Use 'Maybe...' or 'I think...' to reason aloud.",
   },
   {
@@ -58,7 +60,7 @@ const DEFAULT_PROMPTS: ThinkingPrompt[] = [
   },
 ];
 
-function getQuickVietnameseIdeas(sceneContext: string): string[] {
+function getFallbackVietnameseIdeas(sceneContext: string): string[] {
   const lower = sceneContext.toLowerCase();
   if (lower.includes('coffee') || lower.includes('morning')) {
     return ['kẹt xe buổi sáng', 'thuyết trình nhóm', 'ôn lại slide'];
@@ -66,7 +68,14 @@ function getQuickVietnameseIdeas(sceneContext: string): string[] {
   if (lower.includes('plan') || lower.includes('week')) {
     return ['quá tải deadline', 'tắt thông báo', 'ưu tiên việc khó'];
   }
-  return ['token hết hạn', 'đăng nhập bảo mật', 'kiểm tra phản hồi API'];
+  if (
+    lower.includes('study workspace') ||
+    lower.includes('coding') ||
+    lower.includes('login')
+  ) {
+    return ['token hết hạn', 'đăng nhập bảo mật', 'kiểm tra phản hồi API'];
+  }
+  return ['tập trung làm xong', 'tránh bị xao nhãng', 'kiểm tra bước đầu tiên'];
 }
 
 export const HintSheet: React.FC<HintSheetProps> = ({
@@ -80,11 +89,15 @@ export const HintSheet: React.FC<HintSheetProps> = ({
   level2,
   level3,
   vietnameseRescue,
-  sceneContext = 'University Study Workspace',
+  sceneContext = 'Everyday Speaking Scene',
+  quickVietnameseIdeas: customVietnameseIdeas,
   onUseHint,
 }) => {
-  const quickVietnameseIdeas = getQuickVietnameseIdeas(sceneContext);
-  const defaultIdea = quickVietnameseIdeas[0] || 'token hết hạn';
+  const resolvedQuickIdeas =
+    customVietnameseIdeas && customVietnameseIdeas.length > 0
+      ? customVietnameseIdeas.slice(0, 4)
+      : getFallbackVietnameseIdeas(sceneContext);
+  const defaultIdea = resolvedQuickIdeas[0] || 'tập trung làm xong';
 
   const [sheetTab, setSheetTab] = useState<'hints' | 'bridge'>(initialTab);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
@@ -109,11 +122,56 @@ export const HintSheet: React.FC<HintSheetProps> = ({
       setSheetTab(initialTab);
       setUnlockedLevel(userLevel === 'A2' ? 2 : 1);
       setShowVietnamese(userLevel === 'A2');
-      const nextDefault = getQuickVietnameseIdeas(sceneContext)[0] || 'token hết hạn';
+      const nextList =
+        customVietnameseIdeas && customVietnameseIdeas.length > 0
+          ? customVietnameseIdeas
+          : getFallbackVietnameseIdeas(sceneContext);
+      const nextDefault = nextList[0] || 'tập trung làm xong';
       setViInput(nextDefault);
       setBridgeResult(resolveConceptBridgeFallback(nextDefault, sceneContext));
+      void handleLookupConceptBridgeSilently(nextDefault, sceneContext);
     }
-  }, [isOpen, initialTab, userLevel, sceneContext, level1, level2, level3]);
+  }, [
+    isOpen,
+    initialTab,
+    userLevel,
+    sceneContext,
+    customVietnameseIdeas,
+    level1,
+    level2,
+    level3,
+  ]);
+
+  const handleLookupConceptBridgeSilently = async (
+    idea: string,
+    context: string
+  ) => {
+    const trimmed = idea.trim();
+    if (!trimmed) return;
+    try {
+      const res = await apiFetch('/api/concept-bridge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vietnameseIdea: trimmed,
+          sceneContext: context,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.englishChunk) {
+          setBridgeResult((prev) => ({
+            vietnameseIdea: trimmed,
+            englishChunk: data.englishChunk,
+            contextAnchor: data.contextAnchor || prev.contextAnchor,
+            selfBuildPrompt: data.selfBuildPrompt || prev.selfBuildPrompt,
+          }));
+        }
+      }
+    } catch {
+      // Keep instant fallback if offline or API key not set yet
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -149,13 +207,12 @@ export const HintSheet: React.FC<HintSheetProps> = ({
     setViInput(trimmed);
     onUseHint?.(1, true);
 
-    // Instant deterministic result first so UI responds in 0ms on video, then enrich via Gemini if configured
     const instant = resolveConceptBridgeFallback(trimmed, sceneContext);
     setBridgeResult(instant);
     setIsBridging(true);
 
     try {
-      const res = await fetch('/api/concept-bridge', {
+      const res = await apiFetch('/api/concept-bridge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -251,19 +308,21 @@ export const HintSheet: React.FC<HintSheetProps> = ({
               }`}
             >
               <Languages className="w-3.5 h-3.5 stroke-[2.2] shrink-0" />
-              <span>{userLevel === 'A2' ? 'Bí từ? · Bridge' : 'Stuck on a word?'}</span>
+              <span>
+                {userLevel === 'A2' ? 'Bí từ? · Bridge' : 'Stuck on a word?'}
+              </span>
             </button>
           </div>
 
           {sheetTab === 'bridge' ? (
             <div className="flex flex-col gap-2.5">
               <p className="text-[12px] text-[#55625B] leading-snug">
-                Enter 1 Vietnamese concept you’re stuck on. ThinkDirect gives an English concept chunk — never a full translated sentence.
+                Type any Vietnamese word or phrase you’re stuck on. Gemini gives a natural 2–5 word English chunk — never a full translated sentence.
               </p>
 
-              {/* 1-Tap Demo Concept Pills for smooth 1-take video */}
+              {/* Scene-Adapted Quick Concept Pills */}
               <div className="flex items-center gap-1.5 flex-wrap">
-                {quickVietnameseIdeas.map((chip) => (
+                {resolvedQuickIdeas.map((chip) => (
                   <button
                     key={chip}
                     type="button"
@@ -288,16 +347,16 @@ export const HintSheet: React.FC<HintSheetProps> = ({
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleLookupConceptBridge(viInput);
                   }}
-                  placeholder="VD: token hết hạn, kẹt xe..."
+                  placeholder="Nhập cụm tiếng Việt bạn đang bí..."
                   className="flex-1 min-w-0 h-10 rounded-full bg-white px-4 text-[13px] font-semibold text-[#101E17] apple-shadow-xs focus:outline-none focus:ring-2 focus:ring-[#148343]/25"
                 />
                 <button
                   type="button"
                   onClick={() => handleLookupConceptBridge(viInput)}
                   disabled={isBridging}
-                  className="h-10 px-4 rounded-full bg-[#148343] text-white text-[12.5px] font-bold inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap"
+                  className="h-10 px-4 rounded-full bg-[#148343] text-white text-[12.5px] font-bold inline-flex items-center gap-1 cursor-pointer shrink-0 whitespace-nowrap disabled:opacity-60"
                 >
-                  <span>Bridge</span>
+                  <span>{isBridging ? 'Bridging...' : 'Bridge'}</span>
                   <ArrowRight className="w-3.5 h-3.5 stroke-[2.3]" />
                 </button>
               </div>

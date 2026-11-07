@@ -6,14 +6,12 @@ import {
   HintEvent,
   SessionResultData,
   InputMode,
-  SessionMode,
   PracticeContextKey,
   FrameworkType,
   UserLevel,
   NaturalPhrasingUpgrade,
 } from '../types';
 import {
-  DemoPracticeAdapter,
   RealPracticeAdapter,
   IPracticeAdapter,
 } from '../services/practiceAdapters';
@@ -22,6 +20,7 @@ import {
   computeSessionMetrics,
   buildNaturalUpgrade,
 } from '../services/speakingEngine';
+import { apiFetch } from '../services/apiClient';
 import { VoiceDraft } from './VoiceInput';
 import { HintSheet } from './HintSheet';
 import { playPronunciation } from '../utils/audioUtils';
@@ -36,62 +35,52 @@ import { IndependentRecallStage } from './stages/IndependentRecallStage';
 
 interface SpeakingWorkspaceProps {
   scene: SceneData;
-  sessionMode?: SessionMode;
   contextKey?: PracticeContextKey;
   initialRootThought?: string;
   userLevel?: UserLevel;
   canFastTrack?: boolean;
-  initialAutoMode?: boolean;
-  onAutoModeChange?: (next: boolean) => void;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
   onQuit: () => void;
   onCompleteSession: (result: SessionResultData) => void;
 }
 
 export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
   scene,
-  sessionMode = 'demo',
   contextKey = 'STUDY_WORKSPACE',
   initialRootThought,
   userLevel = 'B1',
   canFastTrack = false,
-  initialAutoMode = true,
-  onAutoModeChange,
+  apiKeyConnected,
+  onOpenApiSettings,
   onQuit,
   onCompleteSession,
 }) => {
-  // Default ON so recording a 1-take DevFest demo video is effortless; toggleable anytime to Real Mic
-  const [autoMode, setAutoMode] = useState<boolean>(initialAutoMode);
-
-  const handleToggleAutoMode = () => {
-    setAutoMode((prev) => {
-      const next = !prev;
-      onAutoModeChange?.(next);
-      return next;
-    });
-  };
-
-  const adapter: IPracticeAdapter = useMemo(() => {
-    return sessionMode === 'demo' && autoMode
-      ? new DemoPracticeAdapter(contextKey)
-      : new RealPracticeAdapter(contextKey, scene);
-  }, [sessionMode, autoMode, contextKey, scene]);
+  const adapter: IPracticeAdapter = useMemo(
+    () => new RealPracticeAdapter(contextKey, scene),
+    [contextKey, scene]
+  );
 
   const ctx = adapter.contextData;
+  const blueprint = scene.practiceBlueprint;
+
   const startingThought =
     initialRootThought?.trim() ||
     scene.initialSuggestedThought ||
     ctx.initialThought;
 
-  const isCustomTopicScene = scene.title.trim() !== ctx.title.trim();
-  const isCustomStarter =
-    isCustomTopicScene ||
-    startingThought.trim().toLowerCase() !==
-      ctx.initialThought.trim().toLowerCase();
-
   const cleanRootSentence = startingThought.trim().replace(/[.!?]+$/, '');
   const expr0 = scene.suggestedExpressions[0];
   const expr1 = scene.suggestedExpressions[1];
   const expr2 = scene.suggestedExpressions[2];
+
+  const hintVocabulary = useMemo(() => {
+    const words = [
+      ...scene.objects.map((o) => o.name),
+      ...scene.suggestedExpressions.map((e) => e.phrase),
+    ].filter(Boolean);
+    return Array.from(new Set(words)).slice(0, 10);
+  }, [scene]);
 
   const [stageKey, setStageKey] = useState<LearningStageKey>('EXPANSION');
   const [subStep, setSubStep] = useState<number>(1);
@@ -99,6 +88,11 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
   const [framework, setFramework] = useState<FrameworkType>(
     scene.suggestedFramework || '5W1H'
   );
+
+  // Stores live Gemini overrides for upcoming staircase rungs based on what learner actually spoke
+  const [dynamicRungOverrides, setDynamicRungOverrides] = useState<
+    Record<number, Partial<ExpansionStepConfig>>
+  >({});
 
   const [accumulatedThought, setAccumulatedThought] =
     useState<string>(startingThought);
@@ -124,11 +118,12 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
     level3?: string;
     vietnameseRescue?: string;
   }>({
-    level1: 'Name the specific feature, object, or activity.',
-    level2: "Start with: I'm building... / I'm...",
-    level3: ctx.expansion1Sample,
+    level1: 'Add one specific detail (what, where, or when) to your seed sentence.',
+    level2: `Start with: "${cleanRootSentence}..."`,
+    level3:
+      blueprint?.expansionRungs[0]?.sampleSentence || ctx.expansion1Sample,
     vietnameseRescue:
-      'Gợi ý: Thêm chi tiết cụ thể (tính năng, đồ vật hoặc thời điểm) để mở rộng câu.',
+      'Gợi ý: Đọc lại câu gốc và nối thêm chi tiết cụ thể (đồ vật, địa điểm hoặc thời điểm).',
   });
 
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -138,190 +133,118 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
   } | null>(null);
   const [playingAudioKey, setPlayingAudioKey] = useState<string | null>(null);
 
-  // Curated natural English progression for custom daily prompts & object starters
+  const isCustomTopicWithoutBlueprint =
+    !blueprint &&
+    (scene.title.trim() !== ctx.title.trim() ||
+      startingThought.trim().toLowerCase() !==
+        ctx.initialThought.trim().toLowerCase());
+
+  // Fallback progression for no-camera daily prompts or custom text topics without a vision blueprint
   const customProgression = useMemo(() => {
-    if (!isCustomStarter) return null;
+    if (!isCustomTopicWithoutBlueprint) return null;
 
-    // Case A: Custom Daily Prompt or Live Camera Scene (uses scene.suggestedExpressions[0..2].example)
-    if (isCustomTopicScene) {
-      const lowerRoot = cleanRootSentence.toLowerCase();
-      const step1Tail = lowerRoot.includes('today')
-        ? 'at my desk'
-        : lowerRoot.startsWith("i'm ") || lowerRoot.startsWith("it's ")
-          ? 'this morning'
-          : lowerRoot.includes('extra day')
-            ? 'on this task'
-            : 'this week';
-      const exp1NoDot = `${cleanRootSentence} ${step1Tail}`;
-      const exp1 = `${exp1NoDot}.`;
-
-      const rawEx0 = expr0?.example?.trim() || `${cleanRootSentence} with a clear plan.`;
-      const cleanedEx0 = rawEx0
-        .replace(/^(today,?\s+|right now,?\s+)/i, '')
-        .replace(/\bthis morning\b/gi, 'today')
-        .trim();
-      const loweredEx0 =
-        cleanedEx0.startsWith('I ') || cleanedEx0.startsWith("I'")
-          ? cleanedEx0
-          : `${cleanedEx0.charAt(0).toLowerCase()}${cleanedEx0.slice(1)}`;
-      const exp2 =
-        rawEx0.toLowerCase() === startingThought.trim().toLowerCase()
-          ? `${exp1NoDot} so everything stays on track.`
-          : `${exp1NoDot} — ${loweredEx0}`;
-
-      const exp2NoDot = exp2.replace(/[.!?]+$/, '');
-      const exp3 = lowerRoot.includes('track')
-        ? `${exp2NoDot} right away.`
-        : `${exp2NoDot} so everything stays on track.`;
-
-      const rawEx1 =
-        expr1?.example?.trim() ||
-        'Because it helps me stay focused and organized today.';
-      const whyLine =
-        /^(because|since|one|clear|bullet|main)\b/i.test(rawEx1) ||
-        /\b(help|helps|easier|need|should)\b/i.test(rawEx1)
-          ? rawEx1
-          : `Because ${
-              rawEx1.startsWith('I ') || rawEx1.startsWith("I'")
-                ? rawEx1
-                : `${rawEx1.charAt(0).toLowerCase()}${rawEx1.slice(1)}`
-            }`;
-
-      const rawEx2 =
-        expr2?.example?.trim() ||
-        "First, I'll focus on the most important step right away.";
-      const howLine = rawEx2;
-      const pointLine = `I believe tackling “${scene.title.toLowerCase()}” with a clear structure works best.`;
-      const exampleLine = /^for example\b/i.test(rawEx2)
-        ? rawEx2
-        : `For example, today ${
-            rawEx2.startsWith('I ') || rawEx2.startsWith("I'")
-              ? rawEx2
-              : `${rawEx2.charAt(0).toLowerCase()}${rawEx2.slice(1)}`
-          }`;
-
-      const selfTalk = `${rawEx0}. Maybe something small could slow me down if I rush. ${rawEx2}`;
-      const recall = `${exp3} ${whyLine} Maybe a small obstacle could come up, so ${
-        rawEx2.startsWith('I ') || rawEx2.startsWith("I'")
-          ? rawEx2
-          : `${rawEx2.charAt(0).toLowerCase()}${rawEx2.slice(1)}`
-      }`;
-
-      return {
-        exp1,
-        exp1Example: 'e.g. this morning, at my desk...',
-        exp2,
-        exp2Example: expr0?.phrase
-          ? `e.g. “${expr0.phrase}”`
-          : 'e.g. add your main goal...',
-        exp3,
-        exp3Example: 'e.g. so everything stays on track...',
-        whyLine,
-        howLine,
-        pointLine,
-        reasonLine: whyLine,
-        exampleLine,
-        selfTalkPrompt: `Continue your story for “${scene.title}”: notice what could slow you down and decide your next move.`,
-        selfTalk: selfTalk.replace(/\.\./g, '.'),
-        recallPrompt: `Tell your complete story for “${scene.title}” — what is happening, why it matters, and what you will do next.`,
-        recall,
-      };
-    }
-
-    // Case B: Learner picked an object/expression starter on one of the 3 visual scenes
     const lowerRoot = cleanRootSentence.toLowerCase();
-    const exp1 =
-      contextKey === 'MORNING_COFFEE'
-        ? lowerRoot.includes('table')
-          ? `${cleanRootSentence} right now.`
-          : `${cleanRootSentence} at my sunlit table.`
-        : contextKey === 'PLANNING_DAY'
-          ? lowerRoot.includes('notebook')
-            ? `${cleanRootSentence} at my quiet desk.`
-            : `${cleanRootSentence} in my notebook.`
-          : lowerRoot.includes('login')
-            ? `${cleanRootSentence} at my desk.`
-            : `${cleanRootSentence} to build a login page.`;
+    const step1Tail = lowerRoot.includes('today')
+      ? 'right now'
+      : lowerRoot.startsWith("i'm ") || lowerRoot.startsWith("it's ")
+        ? 'this morning'
+        : 'today';
+    const exp1NoDot = `${cleanRootSentence} ${step1Tail}`;
+    const exp1 = `${exp1NoDot}.`;
 
-    const exp1NoDot = exp1.replace(/[.!?]+$/, '');
+    const rawEx0 =
+      expr0?.example?.trim() || `${cleanRootSentence} with a clear plan.`;
+    const cleanedEx0 = rawEx0
+      .replace(/^(today,?\s+|right now,?\s+)/i, '')
+      .replace(/\bthis morning\b/gi, 'today')
+      .trim();
+    const loweredEx0 =
+      cleanedEx0.startsWith('I ') || cleanedEx0.startsWith("I'")
+        ? cleanedEx0
+        : `${cleanedEx0.charAt(0).toLowerCase()}${cleanedEx0.slice(1)}`;
     const exp2 =
-      contextKey === 'MORNING_COFFEE'
-        ? lowerRoot.includes('class')
-          ? `${exp1NoDot} this morning.`
-          : `${exp1NoDot} before my morning class.`
-        : contextKey === 'PLANNING_DAY'
-          ? lowerRoot.includes('assignment')
-            ? `${exp1NoDot} this week.`
-            : `${exp1NoDot} for two assignments this week.`
-          : lowerRoot.includes('project')
-            ? `${exp1NoDot} tonight.`
-            : `${exp1NoDot} for my university project.`;
+      rawEx0.toLowerCase() === startingThought.trim().toLowerCase()
+        ? `${exp1NoDot} so everything stays on track.`
+        : `${exp1NoDot} — ${loweredEx0}`;
 
     const exp2NoDot = exp2.replace(/[.!?]+$/, '');
-    const exp3 =
-      contextKey === 'MORNING_COFFEE'
-        ? `${exp2NoDot} so I feel calm and prepared.`
-        : contextKey === 'PLANNING_DAY'
-          ? `${exp2NoDot} so I don't feel overwhelmed.`
-          : `${exp2NoDot} so students can sign in securely.`;
+    const exp3 = lowerRoot.includes('track')
+      ? `${exp2NoDot} right away.`
+      : `${exp2NoDot} so everything stays on track.`;
 
-    const pointSample =
-      contextKey === 'MORNING_COFFEE'
-        ? 'I prefer having ten quiet minutes with coffee before morning class.'
-        : contextKey === 'PLANNING_DAY'
-          ? 'I prefer tackling my hardest assignment first in the morning.'
-          : 'I prefer building secure authentication before designing the rest of the app.';
+    const rawEx1 =
+      expr1?.example?.trim() ||
+      'Because it helps me stay focused and organized today.';
+    const whyLine =
+      /^(because|since|one|clear|bullet|main)\b/i.test(rawEx1) ||
+      /\b(help|helps|easier|need|should)\b/i.test(rawEx1)
+        ? rawEx1
+        : `Because ${
+            rawEx1.startsWith('I ') || rawEx1.startsWith("I'")
+              ? rawEx1
+              : `${rawEx1.charAt(0).toLowerCase()}${rawEx1.slice(1)}`
+          }`;
+
+    const rawEx2 =
+      expr2?.example?.trim() ||
+      "First, I'll focus on the most important step right away.";
+    const howLine = rawEx2;
+    const pointLine = `I believe handling “${scene.title.toLowerCase()}” with a clear plan works best.`;
+    const exampleLine = /^for example\b/i.test(rawEx2)
+      ? rawEx2
+      : `For example, today ${
+          rawEx2.startsWith('I ') || rawEx2.startsWith("I'")
+            ? rawEx2
+            : `${rawEx2.charAt(0).toLowerCase()}${rawEx2.slice(1)}`
+        }`;
+
+    const selfTalk = `${rawEx0}. Maybe something small could slow me down if I rush. ${rawEx2}`;
+    const recall = `${exp3} ${whyLine} Maybe a small obstacle could come up, so ${
+      rawEx2.startsWith('I ') || rawEx2.startsWith("I'")
+        ? rawEx2
+        : `${rawEx2.charAt(0).toLowerCase()}${rawEx2.slice(1)}`
+    }`;
 
     return {
       exp1,
-      exp1Example:
-        contextKey === 'MORNING_COFFEE'
-          ? 'e.g. at my sunlit table...'
-          : contextKey === 'PLANNING_DAY'
-            ? 'e.g. in my notebook...'
-            : 'e.g. to build a login page...',
+      exp1Example: 'e.g. this morning, right here...',
       exp2,
-      exp2Example:
-        contextKey === 'MORNING_COFFEE'
-          ? 'e.g. before my morning class...'
-          : contextKey === 'PLANNING_DAY'
-            ? 'e.g. for two assignments this week...'
-            : 'e.g. for my university project...',
+      exp2Example: expr0?.phrase
+        ? `e.g. “${expr0.phrase}”`
+        : 'e.g. add your main context...',
       exp3,
-      exp3Example:
-        contextKey === 'MORNING_COFFEE'
-          ? 'e.g. so I feel calm and prepared...'
-          : contextKey === 'PLANNING_DAY'
-            ? "e.g. so I don't feel overwhelmed..."
-            : 'e.g. so students can sign in securely...',
-      whyLine: ctx.whySample,
-      howLine: ctx.howSample,
-      pointLine: pointSample,
-      reasonLine:
-        ctx.reasonSample ||
-        'Because securing student accounts early keeps the rest of the app safe.',
-      exampleLine:
-        ctx.exampleSample ||
-        'For example, yesterday I tested protected routes before building the dashboard.',
-      selfTalkPrompt: ctx.selfTalkPrompt,
-      selfTalk: ctx.selfTalkMonologue,
-      recallPrompt: ctx.independentRecallPrompt,
-      recall: ctx.independentRecallSample,
+      exp3Example: 'e.g. so everything stays on track...',
+      whyLine,
+      howLine,
+      pointLine,
+      reasonLine: whyLine,
+      exampleLine,
+      selfTalkPrompt: `Continue your story for “${scene.title}”: notice what could slow you down and decide your next move.`,
+      selfTalk: selfTalk.replace(/\.\./g, '.'),
+      recallPrompt: `Tell your complete story for “${scene.title}” — what is happening, why it matters, and what you will do next.`,
+      recall,
     };
   }, [
-    isCustomStarter,
-    isCustomTopicScene,
+    isCustomTopicWithoutBlueprint,
     cleanRootSentence,
     startingThought,
     expr0,
     expr1,
     expr2,
     scene.title,
-    contextKey,
-    ctx,
   ]);
 
-  const expansionSteps: ExpansionStepConfig[] = useMemo(() => {
+  const baseExpansionSteps: ExpansionStepConfig[] = useMemo(() => {
+    if (blueprint && blueprint.expansionRungs.length >= 3) {
+      return blueprint.expansionRungs.slice(0, 3).map((r, idx) => ({
+        stepNum: idx + 1,
+        title: r.focusCue,
+        example: r.exampleChunk,
+        sample: r.sampleSentence,
+        repeatTrap: idx === 0 ? cleanRootSentence.toLowerCase() : undefined,
+      }));
+    }
+
     if (customProgression) {
       return [
         {
@@ -418,15 +341,69 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
           "I'm coding a login page for my university project on my laptop tonight.",
       },
     ];
-  }, [customProgression, cleanRootSentence, contextKey, ctx]);
+  }, [blueprint, customProgression, cleanRootSentence, contextKey, ctx]);
+
+  // Merge live Gemini dynamic rung overrides onto base expansion steps
+  const expansionSteps: ExpansionStepConfig[] = useMemo(
+    () =>
+      baseExpansionSteps.map((step) => {
+        const override = dynamicRungOverrides[step.stepNum];
+        if (!override) return step;
+        return {
+          ...step,
+          title: override.title || step.title,
+          example: override.example || step.example,
+          sample: override.sample || step.sample,
+        };
+      }),
+    [baseExpansionSteps, dynamicRungOverrides]
+  );
 
   const ideaTurns: IdeaTurnConfig[] = useMemo(() => {
-    const basePointSample =
-      contextKey === 'MORNING_COFFEE'
-        ? 'I prefer having ten quiet minutes with coffee before morning class.'
-        : contextKey === 'PLANNING_DAY'
-          ? 'I prefer tackling my hardest assignment first in the morning.'
-          : 'I prefer building secure authentication before designing the rest of the app.';
+    if (blueprint) {
+      if (framework === 'IDEA_REASON_EXAMPLE') {
+        return [
+          {
+            turnNum: 1,
+            questionKey: 'Point',
+            prompt: blueprint.preOpinion.pointPrompt,
+            helper: 'Start with I prefer..., I believe..., or My priority is...',
+            sample: blueprint.preOpinion.pointSample,
+          },
+          {
+            turnNum: 2,
+            questionKey: 'Reason',
+            prompt: blueprint.preOpinion.reasonPrompt,
+            helper: 'Share the main reason or benefit.',
+            sample: blueprint.preOpinion.reasonSample,
+          },
+          {
+            turnNum: 3,
+            questionKey: 'Example',
+            prompt: blueprint.preOpinion.examplePrompt,
+            helper: 'Share one concrete real-life example.',
+            sample: blueprint.preOpinion.exampleSample,
+          },
+        ];
+      }
+
+      return [
+        {
+          turnNum: 1,
+          questionKey: 'Why',
+          prompt: blueprint.fiveWOneH.whyPrompt,
+          helper: 'Explain your main purpose, reason, or motivation.',
+          sample: blueprint.fiveWOneH.whySample,
+        },
+        {
+          turnNum: 2,
+          questionKey: 'How',
+          prompt: blueprint.fiveWOneH.howPrompt,
+          helper: 'Describe how you are doing it or your next practical step.',
+          sample: blueprint.fiveWOneH.howSample,
+        },
+      ];
+    }
 
     if (customProgression) {
       if (framework === 'IDEA_REASON_EXAMPLE') {
@@ -482,7 +459,9 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
             ctx.pointPrompt ||
             'State your main opinion or priority on this topic.',
           helper: 'Open with I prefer..., I believe..., or My priority is...',
-          sample: ctx.pointSample || basePointSample,
+          sample:
+            ctx.pointSample ||
+            'I prefer tackling the most important part first.',
         },
         {
           turnNum: 2,
@@ -491,7 +470,7 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
           helper: 'Share the main reason or benefit.',
           sample:
             ctx.reasonSample ||
-            'Because securing student accounts early keeps the rest of the app safe.',
+            'Because focusing early keeps everything clear and manageable.',
         },
         {
           turnNum: 3,
@@ -500,7 +479,7 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
           helper: 'Mention a specific moment such as yesterday or this morning.',
           sample:
             ctx.exampleSample ||
-            'For example, yesterday I tested protected routes before building the dashboard.',
+            'For example, earlier this week doing that saved me an hour.',
         },
       ];
     }
@@ -521,23 +500,37 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
         sample: ctx.howSample,
       },
     ];
-  }, [customProgression, framework, contextKey, ctx]);
+  }, [blueprint, customProgression, framework, ctx]);
 
-  const effectiveSelfTalkPrompt = customProgression
-    ? customProgression.selfTalkPrompt
-    : ctx.selfTalkPrompt;
+  const effectiveSelfTalkPrompt = blueprint
+    ? blueprint.selfTalk.situationPrompt
+    : customProgression
+      ? customProgression.selfTalkPrompt
+      : ctx.selfTalkPrompt;
 
-  const effectiveSelfTalkMonologue = customProgression
-    ? customProgression.selfTalk
-    : ctx.selfTalkMonologue;
+  const effectiveSelfTalkMonologue = blueprint
+    ? blueprint.selfTalk.fullMonologue
+    : customProgression
+      ? customProgression.selfTalk
+      : ctx.selfTalkMonologue;
 
-  const effectiveRecallPrompt = customProgression
-    ? customProgression.recallPrompt
-    : ctx.independentRecallPrompt;
+  const explicitSelfTalkBeats: [string, string, string] | undefined = blueprint
+    ? [
+        blueprint.selfTalk.beat1Notice,
+        blueprint.selfTalk.beat2Hypothesize,
+        blueprint.selfTalk.beat3Decide,
+      ]
+    : undefined;
 
-  const effectiveRecallSample = customProgression
-    ? customProgression.recall
-    : ctx.independentRecallSample;
+  const effectiveRecallPrompt = blueprint
+    ? blueprint.recall.prompt
+    : customProgression
+      ? customProgression.recallPrompt
+      : ctx.independentRecallPrompt;
+
+  const effectiveMemoryCue = blueprint
+    ? `1. "${scene.title}" & why it matters · 2. Snag: ${blueprint.selfTalk.beat2Hypothesize} · 3. Next: ${blueprint.selfTalk.beat3Decide}`
+    : undefined;
 
   const recordHintEvent = (
     level: 1 | 2 | 3 = 1,
@@ -586,7 +579,7 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
     setInlineFeedback(null);
     const attemptId = `att_${Date.now()}`;
 
-    // METHOD 01: SENTENCE EXPANSION (Steps 1..2)
+    // METHOD 01: SENTENCE EXPANSION (Rungs 1..3)
     if (stageKey === 'EXPANSION') {
       const evaluation = await adapter.evaluateExpansion(
         accumulatedThought,
@@ -618,30 +611,56 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
       if (evaluation.isValid && evaluation.synthesizedThought) {
         const nextSynthesized = evaluation.synthesizedThought;
         setAccumulatedThought(nextSynthesized);
-        setAcceptedExpansions((prev) => [...prev, nextSynthesized]);
+        setAcceptedExpansions((prev) => {
+          const copy = [...prev];
+          copy[subStep] = nextSynthesized;
+          return copy;
+        });
+
+        if (
+          subStep < expansionSteps.length &&
+          (evaluation.nextStepTitle ||
+            evaluation.nextStepExample ||
+            evaluation.nextStepSample)
+        ) {
+          const nextNum = subStep + 1;
+          setDynamicRungOverrides((prev) => ({
+            ...prev,
+            [nextNum]: {
+              title: evaluation.nextStepTitle,
+              example: evaluation.nextStepExample,
+              sample: evaluation.nextStepSample,
+            },
+          }));
+        }
+
         setActiveDraft(null);
         setIsSubmitting(false);
 
         if (subStep >= expansionSteps.length) {
-          const detectedFw = determineFramework(nextSynthesized);
+          const detectedFw = scene.suggestedFramework || determineFramework(nextSynthesized);
           setFramework(detectedFw);
           setIdeaTurnStep(1);
           setStageKey('IDEA_DEVELOPMENT');
           setActiveHints({
-            level1: 'Explain who benefits or what problem this solves.',
-            level2: 'Start with: Students need to... / Because...',
-            level3: ctx.whySample,
-            vietnameseRescue: 'Gợi ý: Giải thích lý do tại sao việc này quan trọng.',
+            level1: 'Explain why this matters or what benefit it brings.',
+            level2: 'Start with: "Because..." or "It helps me..."',
+            level3: blueprint?.fiveWOneH.whySample || ctx.whySample,
+            vietnameseRescue: 'Gợi ý: Giải thích ngắn gọn lý do tại sao việc này quan trọng.',
           });
         } else {
+          const nextIdx = subStep;
+          const nextStepCfg = expansionSteps[nextIdx];
           setSubStep(subStep + 1);
-          const nextStepCfg = expansionSteps[subStep];
           setActiveHints({
-            level1: `Add ${nextStepCfg?.title || 'one more short detail'}`,
-            level2: `Repeat the line above + ${nextStepCfg?.example || 'a short chunk'}`,
-            level3: nextStepCfg?.sample || ctx.expansion2Sample,
+            level1: `Add ${evaluation.nextStepTitle || nextStepCfg?.title || 'one more short detail'}`,
+            level2: `Repeat your sentence + ${evaluation.nextStepExample || nextStepCfg?.example || 'a short chunk'}`,
+            level3:
+              evaluation.nextStepSample ||
+              nextStepCfg?.sample ||
+              ctx.expansion2Sample,
             vietnameseRescue:
-              'Gợi ý: Đọc lại nguyên câu ở bậc trên và nối thêm cụm ngắn màu xanh ở bậc mới.',
+              'Gợi ý: Đọc lại câu vừa nói ở bậc trên và nối thêm 1 cụm ngắn ở cuối câu.',
           });
         }
       } else {
@@ -655,7 +674,9 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
     if (stageKey === 'IDEA_DEVELOPMENT') {
       const currentTurn = ideaTurns[ideaTurnStep - 1];
       const priorAnswer =
-        ideaTurnStep > 1 ? ideaAnswers[ideaTurnStep - 2] || '' : '';
+        ideaTurnStep > 1
+          ? ideaAnswers[ideaTurnStep - 2] || ''
+          : accumulatedThought;
       const evaluation = await adapter.evaluateIdeaTurn(
         currentTurn.questionKey,
         text,
@@ -689,7 +710,10 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
         nextAnswers[ideaTurnStep - 1] = text;
         setIdeaAnswers(nextAnswers);
 
-        if (currentTurn.questionKey === 'Why' || currentTurn.questionKey === 'Reason') {
+        if (
+          currentTurn.questionKey === 'Why' ||
+          currentTurn.questionKey === 'Reason'
+        ) {
           setWhyOrReasonAnswer(text);
         } else if (
           currentTurn.questionKey === 'How' ||
@@ -712,8 +736,10 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
 
     // METHOD 03: GUIDED SELF-TALK
     if (stageKey === 'GUIDED_SELF_TALK') {
-      const evaluation = await adapter.evaluateSelfTalk(text);
-      const spokenSecs = Math.max(16, durationSeconds || 22);
+      const evaluation = await adapter.evaluateSelfTalk(text, {
+        previousSentences: [accumulatedThought, ...ideaAnswers].filter(Boolean),
+      });
+      const spokenSecs = Math.max(12, durationSeconds || 18);
       setAttempts((prev) => [
         ...prev,
         {
@@ -744,7 +770,7 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
       return;
     }
 
-    // METHOD 04: REPEAT WITHOUT HELP (INDEPENDENT RECALL)
+    // METHOD 04: ACTIVE RECALL (INDEPENDENT RECALL)
     if (stageKey === 'INDEPENDENT_RECALL') {
       const recallHintUsed = hintEvents.some(
         (h) => h.stageKey === 'INDEPENDENT_RECALL'
@@ -772,7 +798,7 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
         return;
       }
 
-      const recallSecs = Math.max(20, durationSeconds || 26);
+      const recallSecs = Math.max(15, durationSeconds || 24);
       const finalAttempt: SpeakingAttempt = {
         attemptId,
         questionId: 'RECALL_1',
@@ -793,15 +819,17 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
       ).length;
 
       const fallbackWhy =
-        ideaTurns.find((t) => t.questionKey === 'Why' || t.questionKey === 'Reason')
-          ?.sample || ctx.whySample;
+        ideaTurns.find(
+          (t) => t.questionKey === 'Why' || t.questionKey === 'Reason'
+        )?.sample || ctx.whySample;
       const fallbackHow =
-        ideaTurns.find((t) => t.questionKey === 'How' || t.questionKey === 'Example')
-          ?.sample || ctx.howSample;
+        ideaTurns.find(
+          (t) => t.questionKey === 'How' || t.questionKey === 'Example'
+        )?.sample || ctx.howSample;
 
       const computedMetrics = computeSessionMetrics({
         initialThought: acceptedExpansions[0] || startingThought,
-        acceptedExpansions,
+        acceptedExpansions: acceptedExpansions.filter(Boolean),
         expansionTotalAttempts: expansionAttemptsCount,
         whyAnswer: whyOrReasonAnswer || fallbackWhy,
         howAnswer: howOrExampleAnswer || fallbackHow,
@@ -827,15 +855,15 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
         naturalUpgrade?: NaturalPhrasingUpgrade;
       } = {};
 
-      if ((sessionMode === 'real' || !autoMode) && typeof fetch !== 'undefined') {
+      if (typeof window !== 'undefined') {
         try {
-          const res = await fetch('/api/evaluate-session', {
+          const res = await apiFetch('/api/evaluate-session', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               sceneTitle: scene.title,
               initialThought: acceptedExpansions[0] || startingThought,
-              expansionSentences: acceptedExpansions.slice(1),
+              expansionSentences: acceptedExpansions.slice(1).filter(Boolean),
               developmentSentences:
                 ideaAnswers.length > 0
                   ? ideaAnswers
@@ -845,7 +873,6 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
               hintsUsedCount: hintEvents.length,
               selfTalkDurationSeconds:
                 computedMetrics.speechContinuity.totalSpeakingSeconds,
-              isDemoSession: false,
             }),
           });
           if (res.ok) {
@@ -879,7 +906,7 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
         timestamp: Date.now(),
         sceneTitle: scene.title,
         sceneImageUrl: scene.imageUrl,
-        isDemoSession: sessionMode === 'demo' && autoMode,
+        isDemoSession: false,
         frameworkUsed: framework,
         objectsLearned: scene.objects,
         expressionsLearned: scene.suggestedExpressions,
@@ -901,11 +928,11 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
         ideasExpressedCount: computedMetrics.meaningfulIdeaUnits,
         independentExpressionsUsed: detectedExpressions,
         communicationStrength:
-          serverFeedback.strength || ctx.speakingStrength || evaluation.strength,
+          serverFeedback.strength || evaluation.strength || ctx.speakingStrength,
         oneThingToImprove:
           serverFeedback.improvement ||
-          ctx.actionableImprovement ||
-          evaluation.improvement,
+          evaluation.improvement ||
+          ctx.actionableImprovement,
         suggestedNextPractice:
           serverFeedback.suggestedNextPractice || ctx.nextPracticeSuggestion,
       };
@@ -927,12 +954,14 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
     setAcceptedExpansions([startingThought, fastExpanded]);
     setIdeaAnswers(ideaTurns.map((t) => t.sample));
     setWhyOrReasonAnswer(
-      ideaTurns.find((t) => t.questionKey === 'Why' || t.questionKey === 'Reason')
-        ?.sample || ctx.whySample
+      ideaTurns.find(
+        (t) => t.questionKey === 'Why' || t.questionKey === 'Reason'
+      )?.sample || ctx.whySample
     );
     setHowOrExampleAnswer(
-      ideaTurns.find((t) => t.questionKey === 'How' || t.questionKey === 'Example')
-        ?.sample || ctx.howSample
+      ideaTurns.find(
+        (t) => t.questionKey === 'How' || t.questionKey === 'Example'
+      )?.sample || ctx.howSample
     );
     setStageKey('GUIDED_SELF_TALK');
   };
@@ -946,8 +975,9 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
           scene={scene}
           subStep={subStep}
           userLevel={userLevel}
-          autoMode={autoMode}
-          onToggleAuto={handleToggleAutoMode}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
+          hintVocabulary={hintVocabulary}
           onBack={() => {
             if (subStep > 1) {
               setInlineFeedback(null);
@@ -967,7 +997,6 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
           onDraftChange={setActiveDraft}
           resetSignal={resetSignal}
           isSubmitting={isSubmitting}
-          sessionMode={sessionMode}
           onOpenHint={handleOpenHintSheet}
           onOpenConceptBridge={handleOpenConceptBridge}
           onSkipToSelfTalk={showFastTrack ? handleSkipToSelfTalk : undefined}
@@ -989,8 +1018,9 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
             setInlineFeedback(null);
             setActiveDraft(null);
           }}
-          autoMode={autoMode}
-          onToggleAuto={handleToggleAutoMode}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
+          hintVocabulary={hintVocabulary}
           onBack={() => {
             if (ideaTurnStep > 1) {
               setInlineFeedback(null);
@@ -1001,7 +1031,7 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
               setSubStep(
                 Math.min(
                   expansionSteps.length,
-                  acceptedExpansions.length - 1
+                  acceptedExpansions.filter(Boolean).length - 1
                 ) || 1
               );
             }
@@ -1016,7 +1046,6 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
           onDraftChange={setActiveDraft}
           resetSignal={resetSignal}
           isSubmitting={isSubmitting}
-          sessionMode={sessionMode}
           onOpenHint={handleOpenHintSheet}
           onOpenConceptBridge={handleOpenConceptBridge}
         />
@@ -1031,8 +1060,24 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
               : [accumulatedThought, ...ideaAnswers].filter(Boolean)
           }
           userLevel={userLevel}
-          autoMode={autoMode}
-          onToggleAuto={handleToggleAutoMode}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
+          hintVocabulary={hintVocabulary}
+          explicitBeats={explicitSelfTalkBeats}
+          onValidateBeat={async (text, beatNum, priorBeats) => {
+            const evalRes = await adapter.evaluateSelfTalk(text, {
+              beatStep: beatNum,
+              previousSentences: [
+                accumulatedThought,
+                ...ideaAnswers,
+                ...priorBeats,
+              ].filter(Boolean),
+            });
+            return {
+              isValid: evalRes.isValid,
+              feedback: evalRes.feedback,
+            };
+          }}
           onBack={() => {
             setInlineFeedback(null);
             setStageKey('IDEA_DEVELOPMENT');
@@ -1045,7 +1090,6 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
           onPlaySentence={handlePlaySentence}
           onSubmitAttempt={handleSubmitAttempt}
           isSubmitting={isSubmitting}
-          sessionMode={sessionMode}
           onOpenHint={handleOpenHintSheet}
           onOpenConceptBridge={handleOpenConceptBridge}
         />
@@ -1054,18 +1098,19 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
       {stageKey === 'INDEPENDENT_RECALL' && (
         <IndependentRecallStage
           userLevel={userLevel}
-          autoMode={autoMode}
-          onToggleAuto={handleToggleAutoMode}
+          sceneContext={scene.title}
+          hintVocabulary={hintVocabulary}
+          memoryCueText={effectiveMemoryCue}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
           onBack={() => {
             setInlineFeedback(null);
             setStageKey('GUIDED_SELF_TALK');
           }}
           topicPrompt={effectiveRecallPrompt}
-          recallSample={effectiveRecallSample}
           inlineFeedback={inlineFeedback}
           onSubmitAttempt={handleSubmitAttempt}
           isSubmitting={isSubmitting}
-          sessionMode={sessionMode}
           onRecallCueUsed={() =>
             recordHintEvent(1, false, 'INDEPENDENT_RECALL')
           }
@@ -1077,25 +1122,23 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
           expansionSteps[subStep - 1] || expansionSteps[0];
         const currentIdeaTurn =
           ideaTurns[ideaTurnStep - 1] || ideaTurns[0];
+        const prevExpLine =
+          subStep === 1
+            ? cleanRootSentence
+            : (acceptedExpansions[subStep - 1] || cleanRootSentence).replace(
+                /[.!?]+$/,
+                ''
+              );
 
         const stepDefaultHints =
           stageKey === 'EXPANSION'
-            ? subStep === 1
-              ? {
-                  level1: currentExpStep.title,
-                  level2: `Start with: "${cleanRootSentence}..."`,
-                  level3: currentExpStep.sample,
-                  vietnameseRescue:
-                    'Gợi ý: Giữ ý chính câu đầu và nói thêm 1 chi tiết cụ thể (bạn đang làm việc gì, với vật gì hoặc ở đâu).',
-                }
-              : {
-                  level1: currentExpStep.title,
-                  level2:
-                    'Try adding: "...for my project" or "...so I can..."',
-                  level3: currentExpStep.sample,
-                  vietnameseRescue:
-                    'Gợi ý: Nối thêm mục đích hoặc dự án/bối cảnh cụ thể vào cuối câu bạn vừa mở rộng.',
-                }
+            ? {
+                level1: `Add ${currentExpStep.title}`,
+                level2: `Start with: "${prevExpLine}..." (${currentExpStep.example})`,
+                level3: currentExpStep.sample,
+                vietnameseRescue:
+                  'Gợi ý: Giữ nguyên câu ở bậc trên và nói nối thêm 1 chi tiết cụ thể ở cuối câu.',
+              }
             : stageKey === 'IDEA_DEVELOPMENT'
               ? {
                   level1: currentIdeaTurn.helper,
@@ -1104,23 +1147,25 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
                     currentIdeaTurn.questionKey === 'Reason'
                       ? 'Start with: "Because..." or "It helps me..."'
                       : currentIdeaTurn.questionKey === 'How'
-                        ? 'Start with: "I\'m using..." or "First, I..."'
-                        : 'Start with: "For example, earlier today..."',
+                        ? 'Start with: "I\'m..." or "First, I\'ll..."'
+                        : currentIdeaTurn.questionKey === 'Point'
+                          ? 'Start with: "I prefer..." or "My priority is..."'
+                          : 'Start with: "For example,..."',
                   level3: currentIdeaTurn.sample,
                   vietnameseRescue:
                     currentIdeaTurn.questionKey === 'Why' ||
                     currentIdeaTurn.questionKey === 'Reason'
                       ? 'Gợi ý: Bắt đầu bằng "Because..." để giải thích ngắn gọn lý do hoặc lợi ích.'
-                      : 'Gợi ý: Nêu công cụ bạn dùng ("I\'m using...") hoặc 1 ví dụ thực tế ("For example,...").',
+                      : 'Gợi ý: Nêu cách bạn thực hiện ("First, I\'ll...") hoặc 1 ví dụ thực tế ("For example,...").',
                 }
               : {
                   level1:
                     'Connect 3 short beats: Notice what is happening → Maybe why → What you will do first.',
                   level2:
-                    'Start with: "Something isn\'t working... Maybe... First, I\'ll..."',
+                    'Start with: "Right now,... Maybe... First, I\'ll..."',
                   level3: effectiveSelfTalkMonologue,
                   vietnameseRescue:
-                    'Gợi ý: Tự nói thành tiếng theo 3 nhịp: (1) Vấn đề/tình huống hiện tại → (2) Đoán nguyên nhân ("Maybe...") → (3) Bước đầu tiên sẽ làm ("I should...").',
+                    'Gợi ý: Tự nói thành tiếng theo 3 nhịp: (1) Quan sát hiện tại → (2) Đoán vấn đề ("Maybe...") → (3) Bước đầu tiên sẽ làm ("First, I\'ll...").',
                 };
 
         const resolvedHints = inlineFeedback ? activeHints : stepDefaultHints;
@@ -1153,6 +1198,7 @@ export const SpeakingWorkspace: React.FC<SpeakingWorkspaceProps> = ({
                 : undefined
             }
             sceneContext={scene.title}
+            quickVietnameseIdeas={blueprint?.quickVietnameseBridgeChips}
             onUseHint={(lvl, isVn) => recordHintEvent(lvl, isVn)}
             onHintShown={() => recordHintEvent(1, false)}
           />

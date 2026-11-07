@@ -14,7 +14,6 @@ import {
   IdeaQuestionKey,
   InputMode,
   SceneData,
-  SessionMode,
   UserLevel,
 } from '../../types';
 import { VoiceInput, VoiceDraft } from '../VoiceInput';
@@ -45,8 +44,9 @@ interface IdeaDevelopmentStageProps {
   userLevel?: UserLevel;
   framework: FrameworkType;
   onChangeFramework: (fw: FrameworkType) => void;
-  autoMode: boolean;
-  onToggleAuto: () => void;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
+  hintVocabulary?: string[];
   onBack: () => void;
   expandedThought: string;
   completedAnswers: string[];
@@ -62,7 +62,6 @@ interface IdeaDevelopmentStageProps {
   onDraftChange: (draft: VoiceDraft | null) => void;
   resetSignal: number;
   isSubmitting: boolean;
-  sessionMode: SessionMode;
   onOpenHint: () => void;
   onOpenConceptBridge: () => void;
 }
@@ -73,8 +72,9 @@ export const IdeaDevelopmentStage: React.FC<IdeaDevelopmentStageProps> = ({
   userLevel = 'B1',
   framework,
   onChangeFramework,
-  autoMode,
-  onToggleAuto,
+  apiKeyConnected,
+  onOpenApiSettings,
+  hintVocabulary = [],
   onBack,
   expandedThought,
   completedAnswers,
@@ -85,7 +85,6 @@ export const IdeaDevelopmentStage: React.FC<IdeaDevelopmentStageProps> = ({
   onDraftChange,
   resetSignal,
   isSubmitting,
-  sessionMode,
   onOpenHint,
   onOpenConceptBridge,
 }) => {
@@ -101,9 +100,9 @@ export const IdeaDevelopmentStage: React.FC<IdeaDevelopmentStageProps> = ({
         <PracticeHeader
           onBack={onBack}
           centerMode="brand"
-          rightMode="auto-sparkles"
-          autoActive={autoMode}
-          onToggleAuto={onToggleAuto}
+          rightMode={onOpenApiSettings ? 'api-status' : 'none'}
+          apiKeyConnected={apiKeyConnected}
+          onOpenApiSettings={onOpenApiSettings}
         />
 
         <MethodRoadmapStrip
@@ -331,17 +330,16 @@ export const IdeaDevelopmentStage: React.FC<IdeaDevelopmentStageProps> = ({
                         ? `Speak starting with "${selectedConnector}..."`
                         : `Speak your ${turn.questionKey.toLowerCase()} (${turnStep}/${turns.length})`
                     }
-                    typingPrefill={selectedConnector}
+                    typingPrefill={selectedConnector ? `${selectedConnector} ` : ''}
+                    sceneContext={scene.title}
+                    hintVocabulary={hintVocabulary}
                     onSubmit={(text, src, dur) => {
                       setSelectedConnector('');
                       onSubmitAttempt(text, src, dur);
                     }}
                     onDraftChange={onDraftChange}
                     resetSignal={resetSignal}
-                    sampleResponse={turn.sample}
                     isSubmitting={isSubmitting}
-                    isDemoMode={sessionMode === 'demo'}
-                    autoHappyPath={autoMode}
                   />
 
                   <div className="flex items-center justify-center gap-2 flex-wrap">

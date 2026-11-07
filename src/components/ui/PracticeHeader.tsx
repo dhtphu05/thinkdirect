@@ -3,7 +3,7 @@ import {
   ChevronLeft,
   Ellipsis,
   Flame,
-  Mic,
+  KeyRound,
   Sparkles,
   Zap,
 } from 'lucide-react';
@@ -31,6 +31,8 @@ interface PracticeHeaderProps {
   onToggleAuto?: () => void;
   onMoreClick?: () => void;
   streakDays?: number;
+  apiKeyConnected?: boolean;
+  onOpenApiSettings?: () => void;
   /** Optional second-row sub-navigation (e.g. '< | Camera Practice | 1 of 3') */
   subNav?: SubNavConfig;
   /** Optional subtitle row above segments: e.g. Step 1 of 4 | Capture & Discover */
@@ -50,10 +52,10 @@ export const PracticeHeader: React.FC<PracticeHeaderProps> = ({
   centerMode = 'brand',
   centerTitle,
   rightMode = 'auto-sparkles',
-  autoActive = true,
-  onToggleAuto,
   onMoreClick,
   streakDays = 12,
+  apiKeyConnected = true,
+  onOpenApiSettings,
   subNav,
   stepLabel,
   stageSubtitle,
@@ -93,16 +95,43 @@ export const PracticeHeader: React.FC<PracticeHeaderProps> = ({
         )}
 
         {/* Right Slot */}
-        <div className="flex items-center justify-end shrink-0">
+        <div className="flex items-center justify-end gap-1.5 shrink-0">
+          {onOpenApiSettings && rightMode === 'streak' && (
+            <button
+              type="button"
+              onClick={onOpenApiSettings}
+              className={`h-9 px-3 rounded-full apple-shadow-xs flex items-center gap-1.5 text-[11.5px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                apiKeyConnected
+                  ? 'bg-[#EAF6EE] text-[#148343] hover:bg-[#DEF0E4]'
+                  : 'bg-amber-100 text-amber-900 hover:bg-amber-200/80'
+              }`}
+            >
+              <KeyRound className="w-3.5 h-3.5 stroke-[2.2] shrink-0" />
+              <span>{apiKeyConnected ? 'AI Live' : 'Set Key'}</span>
+            </button>
+          )}
+
           {(rightMode === 'auto-sparkles' || rightMode === 'auto-zap') && (
-            <div className="h-9 px-3 rounded-full bg-[#EAF6EE] text-[#148343] apple-shadow-xs flex items-center gap-1.5 text-[12px] font-bold whitespace-nowrap">
-              {rightMode === 'auto-zap' ? (
+            <button
+              type="button"
+              onClick={onOpenApiSettings}
+              className={`h-9 px-3 rounded-full apple-shadow-xs flex items-center gap-1.5 text-[12px] font-bold whitespace-nowrap ${
+                onOpenApiSettings ? 'cursor-pointer' : 'cursor-default'
+              } ${
+                apiKeyConnected
+                  ? 'bg-[#EAF6EE] text-[#148343]'
+                  : 'bg-amber-100 text-amber-900'
+              }`}
+            >
+              {!apiKeyConnected ? (
+                <KeyRound className="w-3.5 h-3.5 stroke-[2.2] shrink-0" />
+              ) : rightMode === 'auto-zap' ? (
                 <Zap className="w-3.5 h-3.5 text-[#148343] fill-[#148343]/15 stroke-[2.2] shrink-0" />
               ) : (
                 <Sparkles className="w-3.5 h-3.5 text-[#148343] stroke-[2.2] shrink-0" />
               )}
-              <span>AI Coach</span>
-            </div>
+              <span>{apiKeyConnected ? 'AI Live' : 'Set API Key'}</span>
+            </button>
           )}
 
           {rightMode === 'more' && (
@@ -118,12 +147,12 @@ export const PracticeHeader: React.FC<PracticeHeaderProps> = ({
           )}
 
           {rightMode === 'streak' && (
-            <div className="h-9 px-3.5 rounded-full bg-white apple-shadow-xs flex items-center gap-1.5 text-[13px] font-bold text-[#18221D] tabular-nums">
+            <div className="h-9 px-3 rounded-full bg-white apple-shadow-xs flex items-center gap-1.5 text-[12.5px] font-bold text-[#18221D] tabular-nums whitespace-nowrap">
               <Flame
                 className="w-4 h-4 text-[#F97316] fill-[#FB923C]/90 stroke-[2.1] shrink-0"
                 aria-hidden="true"
               />
-              <span>{streakDays} days</span>
+              <span>{streakDays}d</span>
             </div>
           )}
 
